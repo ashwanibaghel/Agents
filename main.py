@@ -4,6 +4,9 @@ import os
 import time
 import signal
 
+os.environ["GIT_TERMINAL_PROMPT"] = "0"
+os.environ["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
+
 if hasattr(sys.stdout, 'reconfigure'):
     sys.stdout.reconfigure(encoding='utf-8')
 
