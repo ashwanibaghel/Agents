@@ -269,7 +269,14 @@ def main():
                             
                             if verified:
                                 result["status"] = "DONE"
-                                result["summary"] = receipt_data.get("summary")
+                                summary_text = receipt_data.get("summary") or ""
+                                task_type = original_agent_task.get("task_type") if original_agent_task else "code"
+                                if task_type == "feature":
+                                    try:
+                                        summary_text += ResultVerifier.generate_feature_proofs(workspace_info.get("workspace"))
+                                    except Exception as e:
+                                        print(f"⚠️ Failed to generate feature proofs: {str(e)}")
+                                result["summary"] = summary_text
                                 result["validation_results"] = verify_details.get("validation_results", [])
                                 checkpoint_manager.delete_checkpoint(task_id)
                                 try:

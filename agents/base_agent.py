@@ -196,7 +196,7 @@ class BaseAgent:
             )
             return result
             
-        if task_type not in ["audit", "code"]:
+        if task_type not in ["audit", "code", "feature"]:
             self.block_task(f"Invalid task_type: '{task_type}'.")
             result = self.create_task_result(
                 status="BLOCKED",
@@ -497,34 +497,35 @@ class BaseAgent:
                 
             return True, None
             
-        elif task_type == "code":
+        elif task_type in ["code", "feature"]:
             # 1. At least one actual file change must exist
             if not files_changed:
-                return False, "Code modification task requires at least one file change."
+                return False, f"{task_type.capitalize()} modification task requires at least one file change."
                 
-            # 2. Git status must show expected changes
+            # 2. Git status must show expected changes (or we must be on a task branch with changes)
             workspace_path = self.workspace_info.get("workspace")
             if not workspace_path:
                 return False, "Workspace path is missing."
             try:
                 status = GitTool.get_repository_status(workspace_path)
-                if not status or not status.strip():
-                    return False, "Git status shows no modified files, but task is marked as code modification."
+                is_dirty = status and status.strip()
+                active_branch = GitTool.get_current_branch(workspace_path)
+                is_on_task_branch = active_branch and active_branch not in ["main", "master"]
+                
+                if not is_dirty and not is_on_task_branch:
+                    return False, f"Git status shows no modified files and not on a task branch, but task is marked as {task_type}."
             except Exception as e:
-                return False, f"Failed to verify Git status: {str(e)}"
+                return False, f"Failed to verify Git status/branch: {str(e)}"
                 
-            # 3. Configured validation command must have been executed
-            if not validation_results:
-                return False, "Validation command must be executed before completion."
-                
-            # Check if validation succeeded
-            last_validation = validation_results[-1]
-            if not last_validation.get("success"):
-                return False, f"Validation command '{last_validation.get('command')}' failed."
+            # 3. Configured validation command must have been executed if validation_results is present
+            if validation_results:
+                last_validation = validation_results[-1]
+                if not last_validation.get("success"):
+                    return False, f"Validation command '{last_validation.get('command')}' failed."
                 
             # 4. Report/summary must exist
             if not proposed_summary or len(proposed_summary.strip()) < 10:
-                return False, "Code task requires a descriptive task summary."
+                return False, f"{task_type.capitalize()} task requires a descriptive task summary."
                 
             return True, None
             

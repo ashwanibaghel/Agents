@@ -316,6 +316,82 @@ class TestCompletionGate(unittest.TestCase):
         self.assertTrue(self.monitor.receipt_dir.startswith(os.path.abspath(self.temp_dir)))
         self.assertFalse(self.monitor.receipt_dir.startswith(self.workspace_dir))
 
+    def test_feature_receipt_passes_with_branch_and_file_change(self):
+        import subprocess
+        # 1. Create branch containing task ID
+        subprocess.run(["git", "checkout", "-b", "feature/task-T-001"], cwd=self.workspace_dir, capture_output=True)
+        
+        # 2. Create a dummy file and commit it (so it shows in git status / diff)
+        file_path = os.path.join(self.workspace_dir, "feature.py")
+        with open(file_path, "w") as f:
+            f.write("# dummy feature")
+            
+        subprocess.run(["git", "add", "feature.py"], cwd=self.workspace_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add feature file"], cwd=self.workspace_dir, capture_output=True)
+        
+        task = {
+            "id": "T-001",
+            "task_type": "feature",
+            "validation_commands": ["git status --short"]
+        }
+        receipt = {
+            "task_id": "T-001",
+            "status": "DONE",
+            "summary": "Implemented feature task",
+            "files_changed": ["feature.py"],
+            "completed_at": "2026"
+        }
+        
+        verified, err, _ = ResultVerifier.verify_result(task, self.workspace_info, receipt)
+        self.assertTrue(verified, f"Feature verification failed: {err}")
+
+    def test_feature_receipt_fails_without_branch(self):
+        import subprocess
+        # 1. Create feature.py and commit to main (not a task branch containing T-002)
+        file_path = os.path.join(self.workspace_dir, "feature.py")
+        with open(file_path, "w") as f:
+            f.write("# dummy feature")
+            
+        subprocess.run(["git", "add", "feature.py"], cwd=self.workspace_dir, capture_output=True)
+        subprocess.run(["git", "commit", "-m", "add feature file"], cwd=self.workspace_dir, capture_output=True)
+        
+        task = {
+            "id": "T-002",
+            "task_type": "feature"
+        }
+        receipt = {
+            "task_id": "T-002",
+            "status": "DONE",
+            "summary": "Implemented feature task",
+            "files_changed": ["feature.py"],
+            "completed_at": "2026"
+        }
+        
+        verified, err, _ = ResultVerifier.verify_result(task, self.workspace_info, receipt)
+        self.assertFalse(verified)
+        self.assertIn("No git branch found containing task ID", err)
+
+    def test_feature_receipt_fails_without_file_change(self):
+        import subprocess
+        # Create branch containing task ID, but no files in files_changed
+        subprocess.run(["git", "checkout", "-b", "feature/task-T-003"], cwd=self.workspace_dir, capture_output=True)
+        
+        task = {
+            "id": "T-003",
+            "task_type": "feature"
+        }
+        receipt = {
+            "task_id": "T-003",
+            "status": "DONE",
+            "summary": "Implemented feature task",
+            "files_changed": [],
+            "completed_at": "2026"
+        }
+        
+        verified, err, _ = ResultVerifier.verify_result(task, self.workspace_info, receipt)
+        self.assertFalse(verified)
+        self.assertIn("requires at least one files_changed entry", err)
+
 
 if __name__ == "__main__":
     unittest.main()

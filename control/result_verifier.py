@@ -61,11 +61,12 @@ class ResultVerifier:
 
             return True, "Audit task successfully verified.", {"validation_results": validation_details}
 
-        elif task_type == "code":
+        elif task_type in ["code", "feature"]:
+            task_id = task.get("id", "")
             # 1. At least one expected repository file changed
             files_changed = receipt_data.get("files_changed", [])
             if not files_changed:
-                return False, "Code task requires at least one files_changed entry.", {}
+                return False, f"{task_type.capitalize()} task requires at least one files_changed entry.", {}
                 
             # 2. Files changed must resolve inside assigned workspace and not include secrets or receipt file
             for path in files_changed:
@@ -78,8 +79,23 @@ class ResultVerifier:
                 # No receipt file in target repository
                 if os.path.basename(path).endswith(".json") and "receipt" in path.lower():
                     return False, f"Receipt file '{path}' is not allowed inside the target repository.", {}
+
+            # 3. Branch verification for feature tasks
+            if task_type == "feature":
+                res_branches = TerminalTool.run_command(workspace_path, "git branch --list")
+                if not res_branches.get("success"):
+                    return False, f"Failed to list branches: {res_branches.get('error')}", {}
+                
+                branches_output = res_branches.get("output", "")
+                has_task_branch = False
+                for line in branches_output.splitlines():
+                    if task_id.lower() in line.lower():
+                        has_task_branch = True
+                        break
+                if not has_task_branch:
+                    return False, f"No git branch found containing task ID '{task_id}'.", {}
                     
-            # 3. Independently compare git status/diff and verify files_changed consistency
+            # 4. Independently compare git status/diff and verify files_changed consistency
             res_git = TerminalTool.run_command(workspace_path, "git status --short")
             if not res_git.get("success"):
                 return False, f"Failed to run git status: {res_git.get('error')}", {}
@@ -91,12 +107,27 @@ class ResultVerifier:
                 if len(line) > 3:
                     path_part = line[3:].strip().strip('"').replace("\\", "/")
                     git_modified_paths.append(path_part)
+
+            # For feature tasks, also get committed files on the task branch compared to main
+            if task_type == "feature":
+                res_branch_diff = TerminalTool.run_command(workspace_path, "git diff --name-only main...")
+                if not res_branch_diff.get("success") or not res_branch_diff.get("output", "").strip():
+                    res_branch_diff = TerminalTool.run_command(workspace_path, "git diff --name-only master...")
+                    
+                if res_branch_diff.get("success"):
+                    diff_output = res_branch_diff.get("output", "")
+                    for line in diff_output.splitlines():
+                        if line.strip():
+                            git_modified_paths.append(line.strip().replace("\\", "/"))
+            
+            # De-duplicate modified paths
+            git_modified_paths = list(set(git_modified_paths))
                     
             # Every file in files_changed must be in git_modified_paths, and vice versa
             normalized_receipt_files = [f.replace("\\", "/").strip() for f in files_changed]
             for f in normalized_receipt_files:
                 if f not in git_modified_paths:
-                    return False, f"File '{f}' listed in receipt files_changed was not modified in actual Git status.", {}
+                    return False, f"File '{f}' listed in receipt files_changed was not modified in actual Git status or branch diff.", {}
                     
             for f in git_modified_paths:
                 # Exclude any untracked or backup files like .bak
@@ -105,16 +136,26 @@ class ResultVerifier:
                 if f not in normalized_receipt_files:
                     return False, f"Workspace contains modification in '{f}' which is not documented in receipt files_changed.", {}
                     
-            # 4. Run git diff check and git diff --cached --check (non-zero exit code if trailing whitespace, conflicts, etc.)
-            res_diff = TerminalTool.run_command(workspace_path, "git diff --check")
-            if not res_diff.get("success"):
-                return False, f"Git diff check failed: {res_diff.get('output') or res_diff.get('error')}", {}
+            # 5. Run git diff check
+            if task_type == "feature":
+                res_diff = TerminalTool.run_command(workspace_path, "git diff --check main...")
+                if not res_diff.get("success") or "unknown revision" in (res_diff.get("error") or "").lower() or "unknown revision" in (res_diff.get("output") or "").lower():
+                    res_diff = TerminalTool.run_command(workspace_path, "git diff --check master...")
+                if not res_diff.get("success"):
+                    # Fallback to local check if branch comparison fails
+                    res_diff_local = TerminalTool.run_command(workspace_path, "git diff --check")
+                    if not res_diff_local.get("success"):
+                        return False, f"Git diff check failed: {res_diff_local.get('output') or res_diff_local.get('error')}", {}
+            else:
+                res_diff = TerminalTool.run_command(workspace_path, "git diff --check")
+                if not res_diff.get("success"):
+                    return False, f"Git diff check failed: {res_diff.get('output') or res_diff.get('error')}", {}
                 
-            res_diff_cached = TerminalTool.run_command(workspace_path, "git diff --cached --check")
-            if not res_diff_cached.get("success"):
-                return False, f"Git diff cached check failed: {res_diff_cached.get('output') or res_diff_cached.get('error')}", {}
+                res_diff_cached = TerminalTool.run_command(workspace_path, "git diff --cached --check")
+                if not res_diff_cached.get("success"):
+                    return False, f"Git diff cached check failed: {res_diff_cached.get('output') or res_diff_cached.get('error')}", {}
                 
-            # 5. Rerun every configured validation command
+            # 6. Rerun every configured validation command
             commands = task.get("validation_commands", [])
             validation_details = []
             for cmd in commands:
@@ -127,7 +168,78 @@ class ResultVerifier:
                 if not res_cmd.get("success"):
                     return False, f"Validation command '{cmd}' failed during independent verification.", {"validation_results": validation_details}
                     
-            return True, "Code task successfully verified.", {"validation_results": validation_details}
+            return True, f"{task_type.capitalize()} task successfully verified.", {"validation_results": validation_details}
             
         else:
             return False, f"Unknown task_type: '{task_type}'.", {}
+
+    @staticmethod
+    def generate_feature_proofs(workspace_path: str) -> str:
+        """
+        Generate a markdown proof report for a feature task containing diff, diff --stat, status, branch, and commit.
+        """
+        # 1. Branch
+        branch = "unknown"
+        res_branch = TerminalTool.run_command(workspace_path, "git rev-parse --abbrev-ref HEAD")
+        if res_branch.get("success"):
+            branch = res_branch.get("output", "").strip()
+
+        # 2. Commit hash
+        commit = "unknown"
+        res_commit = TerminalTool.run_command(workspace_path, "git rev-parse HEAD")
+        if res_commit.get("success"):
+            commit = res_commit.get("output", "").strip()
+
+        # 3. GitHub URL
+        github_url = None
+        res_remote = TerminalTool.run_command(workspace_path, "git config --get remote.origin.url")
+        if res_remote.get("success"):
+            url = res_remote.get("output", "").strip()
+            if url:
+                if url.endswith(".git"):
+                     url = url[:-4]
+                if url.startswith("git@github.com:"):
+                     url = "https://github.com/" + url[len("git@github.com:"):]
+                elif url.startswith("git://github.com/"):
+                     url = "https://github.com/" + url[len("git://github.com/"):]
+                github_url = f"{url}/tree/{branch}"
+
+        # Determine if base is main or master
+        base_branch = "main"
+        res_base_test = TerminalTool.run_command(workspace_path, "git diff --name-only main...")
+        if not res_base_test.get("success"):
+            base_branch = "master"
+
+        # 4. git diff --stat
+        diff_stat = "No changes."
+        res_stat = TerminalTool.run_command(workspace_path, f"git diff --stat {base_branch}...")
+        if res_stat.get("success"):
+            diff_stat = res_stat.get("output", "")
+
+        # 5. git diff
+        git_diff = "No changes."
+        res_diff = TerminalTool.run_command(workspace_path, f"git diff {base_branch}...")
+        if res_diff.get("success"):
+            git_diff = res_diff.get("output", "")
+
+        # 6. git status
+        git_status = "Clean."
+        res_status = TerminalTool.run_command(workspace_path, "git status")
+        if res_status.get("success"):
+            git_status = res_status.get("output", "")
+
+        # Format markdown output
+        report = []
+        report.append("\n\n### 🛡️ VERIFIED FEATURE PROOF (V2.1)")
+        report.append(f"- **Current Branch**: `{branch}`")
+        report.append(f"- **Commit Hash**: `{commit}`")
+        if github_url:
+            report.append(f"- **GitHub URL**: [{github_url}]({github_url})")
+        report.append("\n**Git Status**:")
+        report.append(f"```\n{git_status.strip()}\n```")
+        report.append("\n**Git Diff Stat**:")
+        report.append(f"```\n{diff_stat.strip()}\n```")
+        report.append("\n**Git Diff**:")
+        report.append(f"```diff\n{git_diff.strip()}\n```")
+        
+        return "\n".join(report)
