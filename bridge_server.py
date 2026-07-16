@@ -192,6 +192,8 @@ def get_boss_report():
 
     by_status: dict[str, list] = {}
     for row in rows:
+        if row.get("project") == "system":
+            continue
         s = row.get("status", "unknown")
         by_status.setdefault(s, []).append({
             "task_id": row["task_id"],
@@ -203,12 +205,12 @@ def get_boss_report():
             "error_message": row.get("error_message"),
         })
 
-    total = len(rows)
     done = len(by_status.get("done", []))
     working = len(by_status.get("delegated", [])) + len(by_status.get("claimed", []))
     blocked = len(by_status.get("blocked", []))
     failed = len(by_status.get("failed", []))
     inbox = len(by_status.get("inbox", []))
+    total = done + working + blocked + failed + inbox
 
     return {
         "report_generated_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
@@ -1083,7 +1085,7 @@ def get_dashboard_data():
         # 1. Fetch worker status
         worker_record = []
         try:
-            worker_record = _sb_get("worker_status?worker_id=eq.worker-main")
+            worker_record = _sb_get("tasks?task_id=eq.SYSTEM-WORKER-WORKER-MAIN")
         except Exception:
             pass
             
@@ -1096,8 +1098,18 @@ def get_dashboard_data():
         if worker_record and isinstance(worker_record, list) and len(worker_record) > 0:
             rec = worker_record[0]
             heartbeat_str = rec.get("last_heartbeat_at")
-            started_str = rec.get("started_at")
-            current_task = rec.get("current_task_id")
+            
+            # Read context details
+            context_str = rec.get("context") or "{}"
+            try:
+                context_data = json.loads(context_str) if isinstance(context_str, str) else context_str
+                if not isinstance(context_data, dict):
+                    context_data = {}
+            except Exception:
+                context_data = {}
+                
+            started_str = context_data.get("started_at")
+            current_task = context_data.get("current_task_id")
             
             if heartbeat_str:
                 heartbeat = heartbeat_str
@@ -1115,6 +1127,34 @@ def get_dashboard_data():
                     uptime = int((now - started).total_seconds())
                 except Exception:
                     pass
+        else:
+            # Fallback to old worker_status table if tasks query is empty
+            try:
+                fallback_record = _sb_get("worker_status?worker_id=eq.worker-main")
+                if fallback_record and isinstance(fallback_record, list) and len(fallback_record) > 0:
+                    rec = fallback_record[0]
+                    heartbeat_str = rec.get("last_heartbeat_at")
+                    started_str = rec.get("started_at")
+                    current_task = rec.get("current_task_id")
+                    
+                    if heartbeat_str:
+                        heartbeat = heartbeat_str
+                        try:
+                            hb = datetime.datetime.fromisoformat(heartbeat_str.replace("Z", "+00:00"))
+                            diff = (now - hb).total_seconds()
+                            if diff <= 60.0:
+                                worker_status = "ONLINE"
+                        except Exception:
+                            pass
+                    
+                    if started_str:
+                        try:
+                            started = datetime.datetime.fromisoformat(started_str.replace("Z", "+00:00"))
+                            uptime = int((now - started).total_seconds())
+                        except Exception:
+                            pass
+            except Exception:
+                pass
 
         # 2. Fetch all tasks to aggregate counts and status groupings
         tasks = []
@@ -1137,6 +1177,10 @@ def get_dashboard_data():
         failed_list = []
         
         for t in tasks:
+            # Skip system heartbeat tasks
+            if t.get("project") == "system":
+                continue
+                
             s = t.get("status", "inbox").lower()
             if s == "inbox":
                 inbox_count += 1
@@ -1156,7 +1200,7 @@ def get_dashboard_data():
                 
         # Get latest completed tasks (limit 5)
         completed_statuses = ["done", "blocked", "failed"]
-        latest_completed = [t for t in tasks if t.get("status", "").lower() in completed_statuses][:5]
+        latest_completed = [t for t in tasks if (t.get("status", "").lower() in completed_statuses) and (t.get("project") != "system")][:5]
 
         return {
             "worker_status": worker_status,

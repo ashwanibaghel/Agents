@@ -10,6 +10,7 @@ class SupabaseTaskSource(TaskSource):
         self.supabase_key = supabase_key
         # Default lease timeout is 10 minutes (600s) for stale task recovery
         self.lease_timeout = lease_timeout_seconds
+        self.started_at_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         
         self.headers = {
             "apikey": self.supabase_key,
@@ -33,21 +34,27 @@ class SupabaseTaskSource(TaskSource):
             pass  # Defensive: fail silently if table doesn't exist yet
 
     def update_worker_heartbeat(self, worker_id: str, current_task_id: str = None):
-        """Update last_heartbeat_at for the worker in worker_status table (Upsert)."""
-        url = f"{self.supabase_url}/rest/v1/worker_status"
+        """Update last_heartbeat_at for the worker in the tasks table under a special system task (Upsert)."""
+        task_id = f"SYSTEM-WORKER-{worker_id.upper()}"
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         
+        # Postgrest upsert syntax: POST with Prefer: resolution=merge-duplicates
         payload = {
+            "task_id": task_id,
+            "project": "system",
+            "task_type": "audit",
+            "objective": "Worker presence heartbeat",
+            "status": "done",
             "worker_id": worker_id,
             "last_heartbeat_at": now_iso,
-            "current_task_id": current_task_id
+            "updated_at": now_iso,
+            "context": json.dumps({"current_task_id": current_task_id, "started_at": self.started_at_iso})
         }
-        # postgrest upsert configuration
         headers = {**self.headers, "Prefer": "resolution=merge-duplicates"}
         try:
-            requests.post(url, headers=headers, json=payload, timeout=5.0)
+            requests.post(f"{self.supabase_url}/rest/v1/tasks", headers=headers, json=payload, timeout=5.0)
         except Exception:
-            pass  # Defensive: fail silently if table doesn't exist yet
+            pass  # Defensive: fail silently if DB write fails
 
     def fetch_pending_tasks(self) -> list:
         """Fetch all tasks with status 'inbox' from Supabase."""
