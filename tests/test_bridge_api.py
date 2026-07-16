@@ -128,10 +128,15 @@ class TestBridgeAPI(unittest.TestCase):
         self.assertEqual(data["totals"]["working"], 1)
 
     def test_openapi_json_operation_ids(self):
-        """Verify OpenAPI schema endpoints exist and contain stable operationIds."""
+        """Verify OpenAPI schema endpoints exist, contain stable operationIds, and servers configuration."""
         response = self.client.get("/openapi.json")
         self.assertEqual(response.status_code, 200)
         schema = response.json()
+        
+        # Verify servers block exists and contains the correct URL
+        servers = schema.get("servers", [])
+        self.assertEqual(len(servers), 1)
+        self.assertEqual(servers[0]["url"], "https://agents-x52u.onrender.com")
         
         paths = schema.get("paths", {})
         

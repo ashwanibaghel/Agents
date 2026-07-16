@@ -60,6 +60,12 @@ app = FastAPI(
     title="Ashwani Agent Company — Manager Bridge",
     description="ChatGPT Manager tool endpoints backed by Supabase.",
     version="1.0.0",
+    servers=[
+        {
+            "url": "https://agents-x52u.onrender.com",
+            "description": "Production"
+        }
+    ]
 )
 
 app.add_middleware(
@@ -239,6 +245,12 @@ def custom_openapi():
         version="1.0.0",
         description="ChatGPT Action Connector bridge for managing agent tasks.",
         routes=app.routes,
+        servers=[
+            {
+                "url": "https://agents-x52u.onrender.com",
+                "description": "Production"
+            }
+        ]
     )
     
     # Ensure operationIds are stable and set exactly as required
@@ -257,6 +269,12 @@ def custom_openapi():
         version="1.0.0",
         description="ChatGPT Action Connector bridge for managing agent tasks.",
         routes=app.routes,
+        servers=[
+            {
+                "url": "https://agents-x52u.onrender.com",
+                "description": "Production"
+            }
+        ]
     )
     app.openapi_schema = openapi_schema
     return app.openapi_schema
