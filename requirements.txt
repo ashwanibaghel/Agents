@@ -1,0 +1,8 @@
+PyYAML
+python-dotenv
+GitPython
+requests
+rich
+fastapi
+uvicorn[standard]
+pydantic

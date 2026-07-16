@@ -1,0 +1,64 @@
+name: Ashwani Agent Company — Cloud Worker
+
+on:
+  # Poll every 10 minutes 24/7
+  schedule:
+    - cron: "*/10 * * * *"
+
+  # Allow manual trigger from GitHub Actions UI
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: "Reason for manual trigger"
+        required: false
+        default: "Manual trigger by Ashwani"
+
+# Cancel any in-progress run of the same workflow to avoid duplicate workers
+concurrency:
+  group: cloud-worker
+  cancel-in-progress: false
+
+jobs:
+  worker:
+    name: Poll Supabase & Execute Tasks
+    runs-on: ubuntu-latest
+    timeout-minutes: 8   # GitHub Actions max safe runtime per cycle
+
+    env:
+      SUPABASE_URL:         ${{ secrets.SUPABASE_URL }}
+      SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+      GITHUB_TOKEN:         ${{ secrets.GH_PAT }}
+      WORKER_ID:            github-actions-worker-1
+      RUN_ONCE:             "true"
+      POLL_INTERVAL:        "30"
+      MAX_TASK_RUNTIME:     "420"
+      MAX_ITERATIONS:       "20"
+
+    steps:
+      - name: Checkout agent company code
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure git identity
+        run: |
+          git config --global user.email "worker@ashwani-agent-company.ai"
+          git config --global user.name "Ashwani Agent Company Worker"
+
+      - name: Run cloud worker (one poll cycle)
+        run: python workers/cloud_worker.py
+
+      - name: Upload worker log (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: worker-log-${{ github.run_id }}
+          path: logs/
+          if-no-files-found: ignore

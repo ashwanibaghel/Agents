@@ -1,0 +1,25 @@
+acceptance_criteria:
+- Run LIST_FILES
+autonomy_level: 2
+claimed_at: '2026-07-15T12:37:17.987481'
+constraints:
+- Read-only
+context: Auditing backend readiness
+evidence:
+  conversation_id: c7c8af45-283f-4bc0-920f-d7f046938434
+  project: oi_labs
+  status: BLOCKED
+  summary: 'Independent Verification Failed: Audit task left repository dirty: ??
+    dataset_audit_report.md
+
+    '
+  task_id: OI-001
+last_heartbeat_at: '2026-07-15T12:39:42.054253'
+objective: Audit dataset training readiness
+project: oi_labs
+status: blocked
+task_id: OI-001
+task_type: audit
+validation_commands:
+- git status --short
+worker_id: worker-main

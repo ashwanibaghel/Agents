@@ -1,0 +1,125 @@
+import sqlite3
+import json
+import os
+import datetime
+
+class CheckpointManager:
+    def __init__(self, db_path="state/task_checkpoints.db"):
+        self.db_path = db_path
+        os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
+        self._init_db()
+        
+    def _init_db(self):
+        """Initialize SQLite database and perform self-healing column migrations."""
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS checkpoints (
+                    task_id TEXT PRIMARY KEY,
+                    project TEXT,
+                    status TEXT,
+                    worker_id TEXT,
+                    iteration INTEGER,
+                    observations TEXT,
+                    actions TEXT,
+                    timestamp TEXT,
+                    checkpoint_data TEXT
+                )
+            """)
+            conn.commit()
+            
+            # Programmatically migrate/add columns if they are missing
+            columns_to_add = [
+                ("provider", "TEXT"),
+                ("conversation_id", "TEXT"),
+                ("delegated_at", "TEXT"),
+                ("last_followup_at", "TEXT"),
+                ("worker_model", "TEXT"),
+                ("delegation_status", "TEXT")
+            ]
+            
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(checkpoints)")
+            existing_columns = [col[1] for col in cursor.fetchall()]
+            
+            for col_name, col_type in columns_to_add:
+                if col_name not in existing_columns:
+                    conn.execute(f"ALTER TABLE checkpoints ADD COLUMN {col_name} {col_type}")
+            conn.commit()
+            
+    def save_checkpoint(self, task_id, project, status, worker_id, iteration, observations, actions, checkpoint_data=None):
+        obs_json = json.dumps(observations)
+        act_json = json.dumps(actions)
+        cp_json = json.dumps(checkpoint_data or {})
+        ts = datetime.datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO checkpoints (task_id, project, status, worker_id, iteration, observations, actions, timestamp, checkpoint_data)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    status=excluded.status,
+                    worker_id=excluded.worker_id,
+                    iteration=excluded.iteration,
+                    observations=excluded.observations,
+                    actions=excluded.actions,
+                    timestamp=excluded.timestamp,
+                    checkpoint_data=excluded.checkpoint_data
+            """, (task_id, project, status, worker_id, iteration, obs_json, act_json, ts, cp_json))
+            conn.commit()
+
+    def save_delegation_state(self, task_id, project, status, worker_id, provider, conversation_id, delegated_at, last_followup_at, worker_model, delegation_status):
+        """Save delegation state columns to database checkpoint."""
+        ts = datetime.datetime.now().isoformat()
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("""
+                INSERT INTO checkpoints (
+                    task_id, project, status, worker_id, iteration, observations, actions, timestamp, checkpoint_data,
+                    provider, conversation_id, delegated_at, last_followup_at, worker_model, delegation_status
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(task_id) DO UPDATE SET
+                    status=excluded.status,
+                    worker_id=excluded.worker_id,
+                    timestamp=excluded.timestamp,
+                    provider=excluded.provider,
+                    conversation_id=excluded.conversation_id,
+                    delegated_at=excluded.delegated_at,
+                    last_followup_at=excluded.last_followup_at,
+                    worker_model=excluded.worker_model,
+                    delegation_status=excluded.delegation_status
+            """, (task_id, project, status, worker_id, 0, "[]", "[]", ts, "{}",
+                  provider, conversation_id, delegated_at, last_followup_at, worker_model, delegation_status))
+            conn.commit()
+            
+    def load_checkpoint(self, task_id) -> dict:
+        """Query and return active task checkpoints, including delegation columns."""
+        with sqlite3.connect(self.db_path) as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT project, status, worker_id, iteration, observations, actions, checkpoint_data,
+                       provider, conversation_id, delegated_at, last_followup_at, worker_model, delegation_status
+                FROM checkpoints WHERE task_id=?
+            """, (task_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "task_id": task_id,
+                    "project": row[0],
+                    "status": row[1],
+                    "worker_id": row[2],
+                    "iteration": row[3],
+                    "observations": json.loads(row[4]) if row[4] else [],
+                    "actions": json.loads(row[5]) if row[5] else [],
+                    "checkpoint_data": json.loads(row[6]) if row[6] else {},
+                    "provider": row[7],
+                    "conversation_id": row[8],
+                    "delegated_at": row[9],
+                    "last_followup_at": row[10],
+                    "worker_model": row[11],
+                    "delegation_status": row[12]
+                }
+        return None
+        
+    def delete_checkpoint(self, task_id):
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute("DELETE FROM checkpoints WHERE task_id=?", (task_id,))
+            conn.commit()

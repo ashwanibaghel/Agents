@@ -1,0 +1,27 @@
+acceptance_criteria:
+- Run LIST_FILES
+autonomy_level: 2
+claimed_at: '2026-07-15T12:37:17.980427'
+constraints:
+- Read-only
+context: Auditing membership frontend/backend
+evidence:
+  conversation_id: a5ebfa08-2dad-433d-a696-b50921524f8d
+  project: dkffj
+  status: DONE
+  summary: Audited workspace for membership workflow. Workspace inspected and task
+    branch created.
+  task_id: DKFFJ-001
+  validation_results:
+  - command: git status --short
+    output: ''
+    success: true
+last_heartbeat_at: '2026-07-15T12:37:17.980427'
+objective: Test membership workflow
+project: dkffj
+status: done
+task_id: DKFFJ-001
+task_type: audit
+validation_commands:
+- git status --short
+worker_id: worker-main

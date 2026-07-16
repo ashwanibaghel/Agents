@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: ashwani-agent-bridge
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn bridge_server:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: SUPABASE_URL
+        sync: false      # Set manually in Render dashboard
+      - key: SUPABASE_SERVICE_KEY
+        sync: false      # Set manually in Render dashboard — NEVER commit
+      - key: BRIDGE_TOKEN
+        sync: false      # Set manually in Render dashboard
+      - key: PYTHON_VERSION
+        value: "3.11.0"
+    healthCheckPath: /health
