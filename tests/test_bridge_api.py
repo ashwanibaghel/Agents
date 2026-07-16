@@ -150,9 +150,33 @@ class TestBridgeAPI(unittest.TestCase):
         response = self.client.get("/openapi.json")
         self.assertEqual(response.status_code, 200)
         raw_schema_str = response.text
-        
         sensitive_key = os.environ["SUPABASE_SERVICE_KEY"]
         self.assertNotIn(sensitive_key, raw_schema_str)
+
+    def test_dashboard_ui(self):
+        """Verify the root endpoint serves the HTML dashboard UI."""
+        response = self.client.get("/")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("<!DOCTYPE html>", response.text)
+        self.assertIn("Boss Dashboard", response.text)
+
+    def test_dashboard_data(self):
+        """Verify the /dashboard JSON API returns correct fields and counts."""
+        response = self.client.get("/dashboard")
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        
+        self.assertIn("worker_status", data)
+        self.assertIn("heartbeat", data)
+        self.assertIn("current_task", data)
+        self.assertIn("inbox", data)
+        self.assertIn("working", data)
+        self.assertIn("done", data)
+        self.assertIn("blocked", data)
+        self.assertIn("failed", data)
+        self.assertIn("uptime", data)
+        self.assertIn("latest_completed", data)
+        self.assertIn("lists", data)
 
 if __name__ == "__main__":
     unittest.main()

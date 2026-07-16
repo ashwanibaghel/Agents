@@ -5,9 +5,10 @@ from control.task_source import TaskSource
 from control.task_models import Task
 
 class SupabaseTaskSource(TaskSource):
-    def __init__(self, supabase_url: str, supabase_key: str, lease_timeout_seconds: float = 300.0):
+    def __init__(self, supabase_url: str, supabase_key: str, lease_timeout_seconds: float = 600.0):
         self.supabase_url = supabase_url.rstrip("/")
         self.supabase_key = supabase_key
+        # Default lease timeout is 10 minutes (600s) for stale task recovery
         self.lease_timeout = lease_timeout_seconds
         
         self.headers = {
@@ -15,6 +16,38 @@ class SupabaseTaskSource(TaskSource):
             "Authorization": f"Bearer {self.supabase_key}",
             "Content-Type": "application/json"
         }
+
+    def log_event(self, task_id: str, event_type: str, old_status: str, new_status: str, message: str):
+        """Log a task event into the task_events table in Supabase."""
+        url = f"{self.supabase_url}/rest/v1/task_events"
+        payload = {
+            "task_id": task_id,
+            "event_type": event_type,
+            "old_status": old_status,
+            "new_status": new_status,
+            "message": message
+        }
+        try:
+            requests.post(url, headers=self.headers, json=payload, timeout=5.0)
+        except Exception:
+            pass  # Defensive: fail silently if table doesn't exist yet
+
+    def update_worker_heartbeat(self, worker_id: str, current_task_id: str = None):
+        """Update last_heartbeat_at for the worker in worker_status table (Upsert)."""
+        url = f"{self.supabase_url}/rest/v1/worker_status"
+        now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+        
+        payload = {
+            "worker_id": worker_id,
+            "last_heartbeat_at": now_iso,
+            "current_task_id": current_task_id
+        }
+        # postgrest upsert configuration
+        headers = {**self.headers, "Prefer": "resolution=merge-duplicates"}
+        try:
+            requests.post(url, headers=headers, json=payload, timeout=5.0)
+        except Exception:
+            pass  # Defensive: fail silently if table doesn't exist yet
 
     def fetch_pending_tasks(self) -> list:
         """Fetch all tasks with status 'inbox' from Supabase."""
@@ -70,7 +103,11 @@ class SupabaseTaskSource(TaskSource):
             response = requests.patch(url, headers=headers, json=payload, timeout=10.0)
             if response.status_code == 200:
                 data = response.json()
-                return len(data) > 0
+                if len(data) > 0:
+                    self.log_event(task_id, "status_changed", "inbox", "claimed", f"Task claimed by worker {worker_id}")
+                    # Also update worker_status table
+                    self.update_worker_heartbeat(worker_id, task_id)
+                    return True
             return False
         except Exception as e:
             print(f"⚠️ Supabase claim error: {str(e)}")
@@ -78,40 +115,57 @@ class SupabaseTaskSource(TaskSource):
 
     def update_task_status(self, task_id: str, status: str, evidence: dict = None):
         """Update status and final evidence of a task in Supabase."""
+        # Get old status first for events log
+        old_status = "working"
+        try:
+            r_get = requests.get(f"{self.supabase_url}/rest/v1/tasks?task_id=eq.{task_id}&select=status", headers=self.headers, timeout=5.0)
+            if r_get.status_code == 200 and r_get.json():
+                old_status = r_get.json()[0].get("status", "working")
+        except Exception:
+            pass
+
         url = f"{self.supabase_url}/rest/v1/tasks?task_id=eq.{task_id}"
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         
-        # Map statuses internally
         mapped_status = status.lower()
         if mapped_status == "working":
-            mapped_status = "delegated"  # Keep consistent with BaseAgent lifecycle
+            mapped_status = "delegated"
             
         payload = {
             "status": mapped_status,
             "updated_at": now_iso
         }
         
-        if status == "DONE" and evidence:
+        if status.upper() == "DONE" and evidence:
             payload.update({
                 "summary": evidence.get("summary"),
                 "evidence_paths": evidence.get("evidence_paths", []),
                 "files_changed": evidence.get("files_changed", []),
                 "validation_results": evidence.get("validation_results", [])
             })
-        elif (status in ["FAILED", "BLOCKED"]) and evidence:
+        elif (status.upper() in ["FAILED", "BLOCKED"]) and evidence:
             payload.update({
-                "error_message": evidence.get("error")
+                "error_message": evidence.get("error") or evidence.get("summary")
             })
             
         try:
             response = requests.patch(url, headers=self.headers, json=payload, timeout=10.0)
-            if response.status_code not in [200, 204]:
-                print(f"⚠️ Supabase status update failed ({response.status_code}): {response.text}")
+            if response.status_code in [200, 204]:
+                self.log_event(task_id, "status_changed", old_status, mapped_status, f"Task status updated to {mapped_status}")
         except Exception as e:
             print(f"⚠️ Supabase update error: {str(e)}")
 
-    def release_task(self, task_id: str):
+    def release_task(self, task_id: str, reason: str = "Task released back to inbox"):
         """Release a task back to 'inbox' status, clearing worker claim data."""
+        # Get old status first for events log
+        old_status = "claimed"
+        try:
+            r_get = requests.get(f"{self.supabase_url}/rest/v1/tasks?task_id=eq.{task_id}&select=status", headers=self.headers, timeout=5.0)
+            if r_get.status_code == 200 and r_get.json():
+                old_status = r_get.json()[0].get("status", "claimed")
+        except Exception:
+            pass
+
         url = f"{self.supabase_url}/rest/v1/tasks?task_id=eq.{task_id}"
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         
@@ -125,8 +179,8 @@ class SupabaseTaskSource(TaskSource):
         
         try:
             response = requests.patch(url, headers=self.headers, json=payload, timeout=10.0)
-            if response.status_code not in [200, 204]:
-                print(f"⚠️ Supabase release failed ({response.status_code}): {response.text}")
+            if response.status_code in [200, 204]:
+                self.log_event(task_id, "status_changed", old_status, "inbox", reason)
         except Exception as e:
             print(f"⚠️ Supabase release error: {str(e)}")
 
@@ -137,8 +191,10 @@ class SupabaseTaskSource(TaskSource):
         payload = {"last_heartbeat_at": now_iso, "updated_at": now_iso}
         try:
             requests.patch(url, headers=self.headers, json=payload, timeout=10.0)
+            # Also update worker_status table heartbeat
+            self.update_worker_heartbeat(worker_id, task_id)
         except Exception:
-            pass  # Heartbeat failure is non-fatal
+            pass
 
     def recover_stale_tasks(self) -> int:
         """
@@ -165,7 +221,8 @@ class SupabaseTaskSource(TaskSource):
                 hb = datetime.datetime.fromisoformat(heartbeat_str.replace("Z", "+00:00"))
                 age_seconds = (now - hb).total_seconds()
                 if age_seconds > self.lease_timeout:
-                    self.release_task(row["task_id"])
+                    reason = f"Stale task recovered: no heartbeat for {int(age_seconds)}s (limit {int(self.lease_timeout)}s)"
+                    self.release_task(row["task_id"], reason=reason)
                     print(f"♻️  Recovered stale task {row['task_id']} (heartbeat {int(age_seconds)}s ago)")
                     recovered += 1
             except Exception:

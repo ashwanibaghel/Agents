@@ -67,3 +67,32 @@
     CREATE TRIGGER tasks_updated_at
         BEFORE UPDATE ON public.tasks
         FOR EACH ROW EXECUTE FUNCTION public.set_updated_at();
+
+
+    -- ══════════════════════════════════════════════════════════════════
+    -- Version 2 Upgrades: task_events and worker_status
+    -- ══════════════════════════════════════════════════════════════════
+
+    -- 6. Create task_events table
+    CREATE TABLE IF NOT EXISTS public.task_events (
+        id          BIGSERIAL PRIMARY KEY,
+        task_id     TEXT NOT NULL,
+        event_type  TEXT NOT NULL,
+        old_status  TEXT,
+        new_status  TEXT,
+        message     TEXT,
+        created_at  TIMESTAMPTZ DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_events_task_id ON public.task_events (task_id);
+    ALTER TABLE public.task_events ENABLE ROW LEVEL SECURITY;
+
+    -- 7. Create worker_status table
+    CREATE TABLE IF NOT EXISTS public.worker_status (
+        worker_id         TEXT PRIMARY KEY,
+        last_heartbeat_at TIMESTAMPTZ DEFAULT now(),
+        started_at        TIMESTAMPTZ DEFAULT now(),
+        current_task_id   TEXT
+    );
+
+    ALTER TABLE public.worker_status ENABLE ROW LEVEL SECURITY;

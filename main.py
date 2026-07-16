@@ -81,7 +81,7 @@ def main():
     worker_mode = config.get("company", {}).get("worker_mode", "scripted")
 
     # Polling config
-    poll_interval = 15.0
+    poll_interval = 5.0
     run_once = "--once" in sys.argv or not use_supabase
 
     # Setup signal handler for graceful shutdown
@@ -95,9 +95,19 @@ def main():
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
 
-    print(f"🔄 Worker loop started (Mode: {'RUN_ONCE' if run_once else 'CONTINUOUS_POLLING'}). Press Ctrl+C to stop.")
+    last_worker_heartbeat = 0.0
 
     while not shutdown:
+        # Update worker heartbeat every 15 seconds
+        if use_supabase:
+            now_time = time.time()
+            if now_time - last_worker_heartbeat >= 15.0:
+                try:
+                    task_source.update_worker_heartbeat(worker_id)
+                    last_worker_heartbeat = now_time
+                except Exception:
+                    pass
+
         # 1. Stale task recovery
         if use_supabase:
             try:
