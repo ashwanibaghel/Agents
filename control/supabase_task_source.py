@@ -52,7 +52,7 @@ class SupabaseTaskSource(TaskSource):
         }
         headers = {**self.headers, "Prefer": "resolution=merge-duplicates"}
         try:
-            requests.post(f"{self.supabase_url}/rest/v1/tasks", headers=headers, json=payload, timeout=5.0)
+            requests.post(f"{self.supabase_url}/rest/v1/tasks?on_conflict=task_id", headers=headers, json=payload, timeout=5.0)
         except Exception:
             pass  # Defensive: fail silently if DB write fails
 
