@@ -1,6 +1,7 @@
 import json
 import requests
 import datetime
+import time
 from control.task_source import TaskSource
 from control.task_models import Task
 
@@ -155,12 +156,19 @@ class SupabaseTaskSource(TaskSource):
                 "error_message": evidence.get("error") or evidence.get("summary")
             })
             
-        try:
-            response = requests.patch(url, headers=self.headers, json=payload, timeout=10.0)
-            if response.status_code in [200, 204]:
-                self.log_event(task_id, "status_changed", old_status, mapped_status, f"Task status updated to {mapped_status}")
-        except Exception as e:
-            print(f"⚠️ Supabase update error: {str(e)}")
+        # Retry logic (up to 3 attempts) for robustness against transient timeouts
+        for attempt in range(1, 4):
+            try:
+                response = requests.patch(url, headers=self.headers, json=payload, timeout=10.0)
+                if response.status_code in [200, 204]:
+                    self.log_event(task_id, "status_changed", old_status, mapped_status, f"Task status updated to {mapped_status}")
+                    break
+                else:
+                    print(f"⚠️ Supabase update status failed (attempt {attempt}, code {response.status_code}): {response.text}")
+            except Exception as e:
+                print(f"⚠️ Supabase update error (attempt {attempt}): {str(e)}")
+            if attempt < 3:
+                time.sleep(2.0)
 
     def release_task(self, task_id: str, reason: str = "Task released back to inbox"):
         """Release a task back to 'inbox' status, clearing worker claim data."""
