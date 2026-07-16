@@ -63,10 +63,10 @@ class GitTool:
                     if b in repo.heads and b != active_branch:
                         repo.heads[b].checkout()
                         break
-                # Fetch remote changes first
-                repo.git.fetch("--all")
-                # Pull with --ff-only to ensure safe, fast-forward changes without auto-merge to main
-                repo.git.pull("--ff-only")
+                # Fetch remote changes first with timeout
+                repo.git.fetch("--all", kill_after_timeout=15)
+                # Pull with --ff-only with timeout
+                repo.git.pull("--ff-only", kill_after_timeout=15)
         except Exception as e:
             raise GitError(f"Failed to pull latest changes safely: {str(e)}")
 
