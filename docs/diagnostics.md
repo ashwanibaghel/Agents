@@ -3,9 +3,13 @@
 The `GET /diagnostics` API endpoint provides a read-only snapshot of the system's runtime status.
 
 ## Specifications
-- **Route**: `GET /diagnostics`
-- **Authentication**: None (internal operational endpoint)
+- **Route**: `GET /diagnostics` (Read-only internal API, auth-free by design)
 - **Response Format**: `application/json`
+
+## API Authentication Contract (Other Secured Endpoints)
+Endpoints requiring token authorization (e.g. `/report`, `/tasks/create`) follow standard FastAPI framework behavior:
+- **Missing Authorization header**: Returns `403 Forbidden` (`detail: "Not authenticated"`). This is raised automatically by the FastAPI framework's `HTTPBearer` scheme.
+- **Invalid token credentials**: Returns `401 Unauthorized` (`detail: "Unauthorized"`). This is raised by the application logic (`verify_token` dependency) once formatting is verified.
 
 ## Schema Fields
 
