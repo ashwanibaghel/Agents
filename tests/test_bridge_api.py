@@ -56,7 +56,7 @@ class TestBridgeAPI(unittest.TestCase):
         """Verify endpoints reject requests with missing or invalid tokens."""
         # 1. Missing auth header
         r1 = self.client.get("/report")
-        self.assertEqual(r1.status_code, 401)  # HTTPBearer returns 401 for missing auth
+        self.assertIn(r1.status_code, [401, 403])  # HTTPBearer returns 403 by default for missing auth, or 401
         
         # 2. Invalid token
         r2 = self.client.get("/report", headers={"Authorization": "Bearer wrong-token"})

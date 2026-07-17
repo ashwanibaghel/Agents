@@ -1598,6 +1598,7 @@ def get_diagnostics():
     import sys
     import platform
     import datetime as _dt
+    from control.metrics_manager import metrics_manager
 
     diag = {}
 
