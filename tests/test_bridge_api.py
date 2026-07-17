@@ -49,7 +49,8 @@ class TestBridgeAPI(unittest.TestCase):
         """Verify the health check endpoint returns 200 OK without authentication."""
         response = self.client.get("/health")
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json(), {"status": "ok", "service": "ashwani-agent-company-bridge"})
+        self.assertIn(response.json().get("status"), ["HEALTHY", "UNHEALTHY"])
+        self.assertIn("components", response.json())
 
     def test_unauthorized_request_rejection(self):
         """Verify endpoints reject requests with missing or invalid tokens."""

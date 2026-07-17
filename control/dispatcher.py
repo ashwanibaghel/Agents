@@ -4,6 +4,7 @@ from brains.scripted_brain import ScriptedBrain
 from control.event_bus import event_bus, Event
 from control.audit_trail import audit_trail
 from control.structured_logger import logger
+from control.metrics_manager import metrics_manager
 
 
 def log_transition(
@@ -60,6 +61,17 @@ class Dispatcher:
         try:
             # 1. Prepare Workspace (if this fails, task is BLOCKED)
             try:
+                import os
+                project_config = self.workspace_manager.config.get("projects", {}).get(project_id, {})
+                workspace_rel = project_config.get("workspace")
+                workspace_reused = False
+                if workspace_rel:
+                    workspace_path = os.path.abspath(os.path.join(self.workspace_manager.project_root, workspace_rel))
+                    if os.path.exists(workspace_path) and os.path.exists(os.path.join(workspace_path, ".git")):
+                        workspace_reused = True
+                
+                metrics_manager.record_workspace_reuse(task.get("trace_id"), workspace_reused)
+
                 workspace_info = self.workspace_manager.prepare_workspace(project_id)
                 agent.set_workspace(workspace_info)
                 log_transition("WORKSPACE_PREPARED", "PREPARED", task["id"], project_id, task.get("trace_id"))

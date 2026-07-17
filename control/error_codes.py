@@ -33,3 +33,5 @@ VERIFIER_003 = "VERIFIER_003"  # Verification validation command execution faile
 
 NETWORK_001 = "NETWORK_001"  # Network socket connection timeout or DNS resolution failure
 UNKNOWN_001 = "UNKNOWN_001"  # Uncaught exception
+METRICS_001 = "METRICS_001"  # Metrics database persistence failed
+HEALTH_001 = "HEALTH_001"    # Health check execution failed

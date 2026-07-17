@@ -57,6 +57,7 @@ def main():
             "autonomy_level": 2,
             "status": "inbox"
         }
+        os.makedirs("tasks/inbox", exist_ok=True)
         with open("tasks/inbox/OI-V31-E2E-LOCAL.yaml", "w", encoding="utf-8") as f:
             yaml.dump(task_data, f)
         print("Created feature task tasks/inbox/OI-V31-E2E-LOCAL.yaml")

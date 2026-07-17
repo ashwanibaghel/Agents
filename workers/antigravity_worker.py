@@ -5,6 +5,7 @@ from control.project_runtime import ProjectRuntimeManager
 from control.event_bus import event_bus, Event
 from control.audit_trail import audit_trail
 from control.structured_logger import logger
+from control.metrics_manager import metrics_manager
 
 def log_transition(
     event_type: str,
@@ -237,6 +238,8 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
         session_status = "EXPIRED"
         if session:
             session_status = self.runtime.sessions.check_session_status(project, self.client)
+            if session_status == "EXPIRED":
+                metrics_manager.increment_counter("session_expiry_count")
             
         conv_id = None
         if session and session_status in ["ACTIVE", "IDLE"]:
@@ -253,11 +256,13 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
         if conv_id:
             # Resume existing persistent conversation
             print(f"🔄 Resuming persistent conversation {conv_id} for project {project}...")
+            metrics_manager.record_conversation_reuse(task.get("trace_id"), True)
             log_transition("SESSION_REUSED", "REUSED", task_id, project, task.get("trace_id"), conversation_id=conv_id, branch=f"task-{task_id}" if task_type == "feature" else "main")
             res = self.client.send_message(conv_id, full_prompt)
         else:
             # Create a replacement conversation
             print(f"✨ Creating new persistent conversation session for project {project}...")
+            metrics_manager.record_conversation_reuse(task.get("trace_id"), False)
             res = self.client.new_conversation(full_prompt, model=model)
             
         if not res["success"]:

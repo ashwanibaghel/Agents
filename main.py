@@ -26,6 +26,7 @@ from control.structured_logger import logger
 from control import error_codes
 from control.event_bus import event_bus, Event
 from control.audit_trail import audit_trail
+from control.metrics_manager import metrics_manager
 import uuid
 
 
@@ -67,6 +68,32 @@ def log_transition(
         message=message,
         metadata=metadata
     )
+    
+    # Record metrics for transitions
+    if trace_id:
+        if event_type == "TASK_CLAIMED":
+            metrics_manager.start_task_metric(trace_id, task_id, project_id)
+        elif event_type == "ANTIGRAVITY_STARTED":
+            metrics_manager.start_timer(trace_id, "execution")
+        elif event_type == "ANTIGRAVITY_COMPLETED":
+            metrics_manager.stop_timer(trace_id, "execution")
+        elif event_type == "VERIFICATION_STARTED":
+            metrics_manager.start_timer(trace_id, "verification")
+        elif event_type == "VERIFICATION_PASSED":
+            metrics_manager.stop_timer(trace_id, "verification")
+            metrics_manager.record_verifier_result(trace_id, True)
+        elif event_type == "VERIFICATION_FAILED":
+            metrics_manager.stop_timer(trace_id, "verification")
+            metrics_manager.record_verifier_result(trace_id, False)
+            metrics_manager.increment_counter("verifier_failures")
+        elif event_type == "GIT_PUSH" and status == "PUSHED":
+            metrics_manager.record_git_result(trace_id, True)
+        elif event_type == "TASK_COMPLETED":
+            metrics_manager.complete_task_metric(trace_id, "DONE")
+        elif event_type == "TASK_FAILED":
+            metrics_manager.complete_task_metric(trace_id, "FAILED")
+        elif event_type == "TASK_BLOCKED":
+            metrics_manager.complete_task_metric(trace_id, "BLOCKED")
 
 
 def load_config():
@@ -144,6 +171,7 @@ def main():
     checkpoint_manager = CheckpointManager(db_path="state/task_checkpoints.db")
 
     worker_id = logger.worker_id
+    metrics_manager.record_worker_boot(worker_id)
     worker_mode = config.get("company", {}).get("worker_mode", "scripted")
 
     # Polling config
@@ -166,14 +194,15 @@ def main():
 
     while not shutdown:
         # Update worker heartbeat every 15 seconds
-        if use_supabase:
-            now_time = time.time()
-            if now_time - last_worker_heartbeat >= 15.0:
+        now_time = time.time()
+        if now_time - last_worker_heartbeat >= 15.0:
+            metrics_manager.record_worker_heartbeat(worker_id)
+            if use_supabase:
                 try:
                     task_source.update_worker_heartbeat(worker_id)
-                    last_worker_heartbeat = now_time
                 except Exception as _e:
                     logger.warning(f"Supabase worker heartbeat update failed: {_e}", error_code=error_codes.SUPABASE_003, step="HEARTBEAT")
+            last_worker_heartbeat = now_time
 
         # 1. Stale task recovery
         if use_supabase:
@@ -368,7 +397,9 @@ def main():
                                     try:
                                         from control.project_runtime import ProjectRuntimeManager
                                         runtime = ProjectRuntimeManager()
+                                        metrics_manager.start_timer(trace_ids.get(task_id), "push")
                                         git_res = runtime.git.publish_feature_branch(workspace_info.get("workspace"), task_id)
+                                        metrics_manager.stop_timer(trace_ids.get(task_id), "push")
                                         if git_res["success"]:
                                             log_transition("GIT_COMMIT", "COMMITTED", task_id, project, trace_ids.get(task_id), conversation_id=conv_id, branch=git_res['branch'], metadata={"commit_sha": git_res['commit_sha']})
                                             log_transition("GIT_PUSH", "PUSHED", task_id, project, trace_ids.get(task_id), conversation_id=conv_id, branch=git_res['branch'], metadata={"github_url": git_res['github_url']})
@@ -392,10 +423,15 @@ def main():
                                             except Exception as e:
                                                 logger.warning(f"Failed to generate feature proofs: {str(e)}", trace_id=trace_ids.get(task_id), task_id=task_id, project_id=project, step="VERIFYING")
                                         else:
+                                            metrics_manager.record_git_result(trace_ids.get(task_id), False)
+                                            metrics_manager.increment_counter("git_failures")
                                             logger.error(f"Git publish failed for task {task_id}: {git_res['error']}", error_code=error_codes.GIT_004, trace_id=trace_ids.get(task_id), task_id=task_id, project_id=project, step="PUSHING")
                                             result["status"] = "BLOCKED"
                                             summary_text = f"Git publish failed: {git_res['error']}"
                                     except Exception as git_err:
+                                        metrics_manager.stop_timer(trace_ids.get(task_id), "push")
+                                        metrics_manager.record_git_result(trace_ids.get(task_id), False)
+                                        metrics_manager.increment_counter("git_failures")
                                         logger.error(f"Git publish exception: {str(git_err)}", error_code=error_codes.GIT_004, trace_id=trace_ids.get(task_id), task_id=task_id, project_id=project, step="PUSHING")
                                         result["status"] = "BLOCKED"
                                         summary_text = f"Git publish exception: {str(git_err)}"

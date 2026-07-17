@@ -811,6 +811,48 @@ def get_dashboard_ui():
         </table>
     </div>
 
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-bottom: 2rem;">
+        <!-- Health Section -->
+        <div class="latest-completed-section" style="margin-bottom: 0;">
+            <h2>❤️ System Component Health (V3.2)</h2>
+            <table class="completed-table">
+                <thead>
+                    <tr>
+                        <th>Component</th>
+                        <th>Health State</th>
+                        <th>Status</th>
+                        <th>Latency</th>
+                        <th>Last Check</th>
+                        <th>Retries</th>
+                    </tr>
+                </thead>
+                <tbody id="health-table-body">
+                    <tr>
+                        <td colspan="6" style="text-align: center; color: var(--text-muted); font-style: italic;">Loading health data...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Metrics Section -->
+        <div class="latest-completed-section" style="margin-bottom: 0;">
+            <h2>📈 Runtime Observability Metrics (V3.2)</h2>
+            <table class="completed-table">
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Value</th>
+                    </tr>
+                </thead>
+                <tbody id="metrics-table-body">
+                    <tr>
+                        <td colspan="2" style="text-align: center; color: var(--text-muted); font-style: italic;">Loading metrics...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </div>
+
     <div class="latest-completed-section">
         <h2>📊 Recent Finished Tasks</h2>
         <table class="completed-table">
@@ -1116,6 +1158,72 @@ def get_dashboard_ui():
                         `;
                     }).join('');
                 }
+                
+                // Render Component Health
+                const healthTbody = document.getElementById('health-table-body');
+                if (data.health && data.health.components) {
+                    const healthRows = [];
+                    for (const [name, c] of Object.entries(data.health.components)) {
+                        let stateClass = 'offline';
+                        if (c.health_state === 'HEALTHY') stateClass = 'online';
+                        else if (c.health_state === 'DEGRADED') stateClass = 'working';
+                        
+                        const lastCheckStr = c.last_check ? new Date(c.last_check).toLocaleTimeString() : 'N/A';
+                        healthRows.push(`
+                            <tr>
+                                <td style="font-weight: 600; color: #a78bfa;">${name}</td>
+                                <td><span class="status-badge ${stateClass}">${c.health_state}</span></td>
+                                <td style="font-size: 0.85rem; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${c.status}</td>
+                                <td style="font-family: monospace;">${c.latency_ms}ms</td>
+                                <td>${lastCheckStr}</td>
+                                <td style="text-align: center;">${c.retry_count}</td>
+                            </tr>
+                        `);
+                    }
+                    healthTbody.innerHTML = healthRows.join('');
+                } else {
+                    healthTbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No health data available</td></tr>`;
+                }
+
+                // Render Metrics Table
+                const metricsTbody = document.getElementById('metrics-table-body');
+                if (data.metrics) {
+                    const m = data.metrics;
+                    const tm = m.task_metrics || {};
+                    const em = m.execution_metrics || {};
+                    const rm = m.reliability_metrics || {};
+                    const reuse = m.reuse_metrics || {};
+                    const succ = m.success_metrics || {};
+                    const wm = m.worker_metrics || {};
+                    
+                    const formatPct = (val) => (val * 100).toFixed(1) + '%';
+                    const formatDuration = (ms) => ms > 0 ? (ms / 1000).toFixed(2) + 's' : '0.00s';
+                    
+                    metricsTbody.innerHTML = `
+                        <tr><td><strong>Total Tasks Claimed</strong></td><td>${tm.total_tasks || 0}</td></tr>
+                        <tr><td><strong>Completed / Failed / Blocked</strong></td><td>
+                            <span class="status-badge online">${tm.completed_tasks || 0}</span> / 
+                            <span class="status-badge offline">${tm.failed_tasks || 0}</span> / 
+                            <span class="status-badge blocked">${tm.blocked_tasks || 0}</span>
+                        </td></tr>
+                        <tr><td><strong>Average Runtime</strong></td><td>${formatDuration(em.average_execution)}</td></tr>
+                        <tr><td><strong>Median Runtime (P50)</strong></td><td>${formatDuration(em.median_execution)}</td></tr>
+                        <tr><td><strong>P95 Runtime</strong></td><td>${formatDuration(em.P95_execution)}</td></tr>
+                        <tr><td><strong>Fastest / Slowest Runtime</strong></td><td>${formatDuration(em.fastest_task)} / ${formatDuration(em.slowest_task)}</td></tr>
+                        <tr><td><strong>Workspace Reuse %</strong></td><td>${formatPct(reuse.workspace_reuse_rate)}</td></tr>
+                        <tr><td><strong>Conversation Reuse %</strong></td><td>${formatPct(reuse.conversation_reuse_rate)}</td></tr>
+                        <tr><td><strong>Git Success %</strong></td><td>${formatPct(succ.git_success_rate)}</td></tr>
+                        <tr><td><strong>Verifier Success %</strong></td><td>${formatPct(succ.verifier_success_rate)}</td></tr>
+                        <tr><td><strong>Reliability Retries / Expiries</strong></td><td>
+                            Retries: ${rm.retry_count || 0} | Session Expiries: ${rm.session_expiry_count || 0} | Metrics Failures: ${rm.metrics_failures || 0}
+                        </td></tr>
+                        <tr><td><strong>Worker Uptime / Startup Count</strong></td><td>
+                            Uptime: ${wm.worker_uptime || 0}s | Startups: ${wm.startup_count || 0}
+                        </td></tr>
+                    `;
+                } else {
+                    metricsTbody.innerHTML = `<tr><td colspan="2" style="text-align: center; color: var(--text-muted);">No metrics data available</td></tr>`;
+                }
             } catch (err) {
                 console.error("Dashboard pull error:", err);
             }
@@ -1296,6 +1404,13 @@ def get_dashboard_data():
         except Exception as e:
             print(f"⚠️ Failed to fetch project sessions: {e}")
 
+        from control.health_monitor import HealthMonitor
+        from control.metrics_manager import metrics_manager
+        
+        monitor = HealthMonitor()
+        health_data = monitor.get_system_health()
+        metrics_data = metrics_manager.get_metrics_report()
+
         return {
             "worker_status": worker_status,
             "heartbeat": heartbeat,
@@ -1308,6 +1423,8 @@ def get_dashboard_data():
             "latest_completed": latest_completed,
             "uptime": uptime,
             "sessions": sessions,
+            "health": health_data,
+            "metrics": metrics_data,
             "lists": {
                 "inbox": inbox_list[:10],
                 "working": working_list[:10],
@@ -1341,7 +1458,15 @@ def get_dashboard_data():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "ashwani-agent-company-bridge"}
+    from control.health_monitor import HealthMonitor
+    monitor = HealthMonitor()
+    return monitor.get_system_health()
+
+
+@app.get("/metrics")
+def metrics():
+    from control.metrics_manager import metrics_manager
+    return metrics_manager.get_metrics_report()
 
 
 @app.get("/openapi.json", include_in_schema=False)
