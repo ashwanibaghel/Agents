@@ -2,91 +2,48 @@ import os
 import datetime
 from workers.antigravity_client import AntigravityClient
 from control.project_runtime import ProjectRuntimeManager
-from control.event_bus import event_bus, Event
-from control.audit_trail import audit_trail
-from control.structured_logger import logger
 from control.metrics_manager import metrics_manager
+from control.telemetry import log_transition
+from control.config_manager import ConfigManager
 
-def log_transition(
-    event_type: str,
-    status: str,
-    task_id: str,
-    project_id: str,
-    trace_id: str,
-    conversation_id=None,
-    branch=None,
-    error_code=None,
-    message=None,
-    metadata=None
-):
-    evt_data = {
-        "trace_id": trace_id,
-        "worker_id": logger.worker_id,
-        "task_id": task_id,
-        "project_id": project_id,
-        "conversation_id": conversation_id,
-        "branch": branch,
-        "status": status,
-        "error_code": error_code,
-        "message": message,
-        "metadata": metadata or {}
-    }
-    event_bus.publish(Event(event_type, evt_data))
-    audit_trail.append(
-        event_type=event_type,
-        status=status,
-        trace_id=trace_id,
-        worker_id=logger.worker_id,
-        task_id=task_id,
-        project_id=project_id,
-        conversation_id=conversation_id,
-        branch=branch,
-        error_code=error_code,
-        message=message,
-        metadata=metadata
-    )
 
 class AntigravityWorker:
     def __init__(self, checkpoint_manager=None, task_source=None, client=None, db_path=None):
         self.checkpoint_manager = checkpoint_manager
         self.task_source = task_source
         self.client = client or AntigravityClient()
-        
+        self._config_manager = ConfigManager()
+
         if db_path is None:
             if checkpoint_manager and hasattr(checkpoint_manager, "db_path"):
                 db_path = checkpoint_manager.db_path
             else:
                 db_path = "state/task_checkpoints.db"
-                
+
         self.runtime = ProjectRuntimeManager(db_path=db_path)
 
-    def _load_proj_config(self, project: str) -> dict:
-        """Safely load project config from config/projects.yaml. Returns {} if missing."""
+    def _get_project_config(self, project: str) -> dict:
+        """Load project config via ConfigManager. Returns {} if missing."""
         try:
-            import yaml
-            config_path = "config/projects.yaml"
-            if os.path.exists(config_path):
-                with open(config_path, "r", encoding="utf-8") as f:
-                    cfg = yaml.safe_load(f) or {}
-                return cfg.get("projects", {}).get(project, {})
+            cfg = self._config_manager.projects_config
+            return cfg.get("projects", {}).get(project, {})
         except Exception:
-            pass
-        return {}
+            return {}
 
     def validate_isolation(self, project: str, workspace_path: str):
         """Strict project/workspace path isolation check. Rejects mismatch."""
         if not workspace_path:
             raise ValueError(f"Workspace path is missing for project '{project}'.")
-            
+
         abs_workspace = os.path.abspath(workspace_path).lower().replace("\\", "/")
-        
+
         if project == "oi_labs":
             expected_suffix = "workspaces/oi-labs"
         elif project == "dkffj":
             expected_suffix = "workspaces/dkffj"
         else:
             raise ValueError(f"Project '{project}' is not authorized for Antigravity dispatch.")
-            
+
         if not abs_workspace.endswith(expected_suffix):
             raise ValueError(
                 f"Workspace isolation violation! Project '{project}' workspace path '{workspace_path}' "
@@ -99,7 +56,7 @@ class AntigravityWorker:
         constraints = task.get("constraints", [])
         commands = task.get("validation_commands", [])
         task_id = task.get("id")
-        
+
         prompt = f"""[ANTIGRAVITY TASK INSTRUCTION]
 TASK_ID: {task_id}
 PROJECT: {task.get("project")}
@@ -149,162 +106,161 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
 """
         return prompt
 
-    def dispatch_task(self, task: dict, workspace_info: dict, worker_id: str) -> dict:
-        """Claim and dispatch the task using ProjectRuntimeManager persistent sessions."""
-        project = task.get("project")
+    # ── Private helpers ──────────────────────────────────────────────────────
+
+    def _resume_from_checkpoint(self, task: dict, worker_id: str) -> dict | None:
+        """Check for an existing checkpoint. Returns resume result dict or None to continue."""
         task_id = task.get("id")
-        task_type = task.get("task_type")
-        workspace_path = workspace_info.get("workspace")
-        
-        # 1. Project Isolation Check
-        self.validate_isolation(project, workspace_path)
-        
-        # 2. Acquire database-backed lock on workspace
-        if not self.runtime.sessions.acquire_lock(project, worker_id):
-            print(f"🔒 Workspace lock acquisition failed for project '{project}' (already locked by another worker).")
+        project = task.get("project")
+        trace_id = task.get("trace_id")
+
+        if not self.checkpoint_manager:
+            return None
+
+        checkpoint = self.checkpoint_manager.load_checkpoint(task_id)
+        if not (checkpoint and checkpoint.get("provider") == "antigravity" and checkpoint.get("conversation_id")):
+            return None
+
+        conv_id = checkpoint.get("conversation_id")
+        meta_res = self.client.get_conversation_metadata(conv_id)
+        conv_alive = False
+
+        if meta_res.get("success"):
+            try:
+                import datetime as _dt
+                resp = meta_res.get("response", {})
+                inner = resp.get("conversationMetadata", {}).get("metadata", resp)
+                ts = inner.get("lastActivityTime") or inner.get("updatedAt") or inner.get("createdAt")
+                if ts:
+                    last = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                    diff = (_dt.datetime.now(_dt.timezone.utc) - last).total_seconds()
+                    conv_alive = diff < 86400.0
+                else:
+                    conv_alive = True  # no timestamp → assume alive (mock/test)
+            except Exception:
+                conv_alive = True  # parse error → assume alive
+
+        if conv_alive:
+            print(f"⚙️ Worker {worker_id} is resuming Antigravity task {task_id} with conversation {conv_id}...")
             return {
                 "task_id": task_id,
                 "project": project,
-                "status": "BLOCKED",
-                "reason": "Workspace is currently locked by another worker."
+                "status": "DELEGATED",
+                "conversation_id": conv_id,
+                "summary": f"Task is currently delegated to Antigravity conversation {conv_id}.",
             }
 
-        # 3. Check if a task checkpoint already exists (e.g. for resumption across restarts)
-        if self.checkpoint_manager:
-            checkpoint = self.checkpoint_manager.load_checkpoint(task_id)
-            if checkpoint and checkpoint.get("provider") == "antigravity" and checkpoint.get("conversation_id"):
-                conv_id = checkpoint.get("conversation_id")
-                # Validate the conversation is still alive by checking metadata directly
-                meta_res = self.client.get_conversation_metadata(conv_id)
-                conv_alive = False
-                if meta_res.get("success"):
-                    # Check if last activity is within 24 hours
-                    try:
-                        import datetime as _dt
-                        resp = meta_res.get("response", {})
-                        inner = resp.get("conversationMetadata", {}).get("metadata", resp)
-                        ts = inner.get("lastActivityTime") or inner.get("updatedAt") or inner.get("createdAt")
-                        if ts:
-                            last = _dt.datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                            diff = (_dt.datetime.now(_dt.timezone.utc) - last).total_seconds()
-                            conv_alive = diff < 86400.0  # alive if < 24 hours old
-                        else:
-                            conv_alive = True  # no timestamp → assume alive (mock/test scenario)
-                    except Exception:
-                        conv_alive = True  # if we can't parse, assume alive
-                if conv_alive:
-                    print(f"⚙️ Worker {worker_id} is resuming Antigravity task {task_id} with conversation {conv_id}...")
-                    return {
-                        "task_id": task_id,
-                        "project": project,
-                        "status": "DELEGATED",
-                        "conversation_id": conv_id,
-                        "summary": f"Task is currently delegated to Antigravity conversation {conv_id}."
-                    }
-                else:
-                    print(f"⚠️ Checkpoint conversation {conv_id} is EXPIRED — clearing and re-dispatching fresh for task {task_id}...")
-                    self.checkpoint_manager.save_checkpoint(task_id, project, "redispatching", "antigravity", 0, [], [])
+        # Expired checkpoint — clear and re-dispatch
+        print(f"⚠️ Checkpoint conversation {conv_id} is EXPIRED — clearing and re-dispatching fresh for task {task_id}...")
+        self.checkpoint_manager.save_checkpoint(task_id, project, "redispatching", "antigravity", 0, [], [])
+        return None
 
-        # 4. Git feature workflow (fetch, dirty check, branch creation)
-        if task_type == "feature":
-            print(f"🧹 Preparing feature branch task-{task_id} inside {workspace_path}...")
-            # Verify/update workspace remote URL safely first
-            repo_config = self.runtime.sessions.get_session(project)
-            repo_url = repo_config.get("repository_url") if repo_config else None
-            # If not in session, load from projects.yaml config
-            if not repo_url:
-                proj_config = self._load_proj_config(project)
-                repo_url = proj_config.get("repository")
-                
-            if repo_url:
-                self.runtime.workspaces.verify_or_update_workspace(project, repo_url, workspace_path)
-                
-            res_git = self.runtime.git.prepare_feature_branch(workspace_path, task_id)
-            if res_git["success"]:
-                log_transition("GIT_CHECKOUT", "CHECKOUT", task_id, project, task.get("trace_id"), branch=f"task-{task_id}")
-            else:
-                # Release lock on failure
-                self.runtime.sessions.release_lock(project, worker_id)
-                print(f"❌ Git prepare branch failed: {res_git['error']}")
-                return {
-                    "task_id": task_id,
-                    "project": project,
-                    "status": "BLOCKED",
-                    "reason": res_git["error"]
-                }
+    def _setup_git_branch(self, task: dict, workspace_path: str, worker_id: str) -> dict | None:
+        """Prepare Git feature branch. Returns BLOCKED result dict on failure, None on success."""
+        task_id = task.get("id")
+        project = task.get("project")
+        trace_id = task.get("trace_id")
 
-        # 5. Load or create persistent conversation session
+        print(f"🧹 Preparing feature branch task-{task_id} inside {workspace_path}...")
+
+        repo_url = None
+        repo_config = self.runtime.sessions.get_session(project)
+        if repo_config:
+            repo_url = repo_config.get("repository_url")
+        if not repo_url:
+            proj_config = self._get_project_config(project)
+            repo_url = proj_config.get("repository")
+
+        if repo_url:
+            self.runtime.workspaces.verify_or_update_workspace(project, repo_url, workspace_path)
+
+        res_git = self.runtime.git.prepare_feature_branch(workspace_path, task_id)
+        if res_git["success"]:
+            log_transition("GIT_CHECKOUT", "CHECKOUT", task_id, project, trace_id, branch=f"task-{task_id}")
+            return None  # success
+
+        # Failure — release lock
+        self.runtime.sessions.release_lock(project, worker_id)
+        print(f"❌ Git prepare branch failed: {res_git['error']}")
+        return {
+            "task_id": task_id,
+            "project": project,
+            "status": "BLOCKED",
+            "reason": res_git["error"],
+        }
+
+    def _create_or_resume_session(self, task: dict) -> tuple[str | None, str]:
+        """Load or create persistent conversation session. Returns (conv_id, session_status)."""
+        project = task.get("project")
+        trace_id = task.get("trace_id")
+        task_id = task.get("id")
+        task_type = task.get("task_type")
+
         session = self.runtime.sessions.get_session(project)
         session_status = "EXPIRED"
+
         if session:
             session_status = self.runtime.sessions.check_session_status(project, self.client)
             if session_status == "EXPIRED":
                 metrics_manager.increment_counter("session_expiry_count")
-            
+
         conv_id = None
         if session and session_status in ["ACTIVE", "IDLE"]:
             conv_id = session["conversation_id"]
-            
-        # Compile prompt (pre-inject context and memory)
+
+        # Compile full prompt
         task_context = self.runtime.tasks.inject_task_context(task)
         project_memory = self.runtime.memories.get_memory_prompt(project)
+        workspace_path = task.get("_workspace_path", "")
         base_instructions = self.build_prompt(task, workspace_path)
         full_prompt = f"{task_context}{project_memory}{base_instructions}"
-        
+
         model = "pro" if task.get("autonomy_level", 2) >= 2 else "flash"
-        
+
         if conv_id:
-            # Resume existing persistent conversation
             print(f"🔄 Resuming persistent conversation {conv_id} for project {project}...")
-            metrics_manager.record_conversation_reuse(task.get("trace_id"), True)
-            log_transition("SESSION_REUSED", "REUSED", task_id, project, task.get("trace_id"), conversation_id=conv_id, branch=f"task-{task_id}" if task_type == "feature" else "main")
+            metrics_manager.record_conversation_reuse(trace_id, True)
+            log_transition(
+                "SESSION_REUSED", "REUSED", task_id, project, trace_id,
+                conversation_id=conv_id,
+                branch=f"task-{task_id}" if task_type == "feature" else "main",
+            )
             res = self.client.send_message(conv_id, full_prompt)
         else:
-            # Create a replacement conversation
             print(f"✨ Creating new persistent conversation session for project {project}...")
-            metrics_manager.record_conversation_reuse(task.get("trace_id"), False)
+            metrics_manager.record_conversation_reuse(trace_id, False)
             res = self.client.new_conversation(full_prompt, model=model)
-            
-        if not res["success"]:
-            # Release lock on failure
-            self.runtime.sessions.release_lock(project, worker_id)
-            error_reason = res.get("error") or "Unknown dispatch error"
-            return {
-                "task_id": task_id,
-                "project": project,
-                "status": "FAILED",
-                "summary": f"Failed to dispatch to Antigravity: {error_reason}",
-                "error": error_reason
-            }
-            
-        # Extract and register new conversation ID if needed
-        new_conv_id = AntigravityClient.extract_conversation_id(res.get("response", {}))
-        if not new_conv_id:
-            new_conv_id = AntigravityClient.extract_conversation_id(res)
-            
-        if new_conv_id:
-            conv_id = new_conv_id
-            if not session or session_status == "EXPIRED":
-                log_transition("SESSION_CREATED", "CREATED", task_id, project, task.get("trace_id"), conversation_id=conv_id, branch=f"task-{task_id}" if task_type == "feature" else "main")
-        elif not conv_id:
-            conv_id = f"missing-conv-id-{task_id}"
-            
-        # Save persistent session metadata
-        proj_config = self._load_proj_config(project)
+
+        return res, session, session_status, conv_id, model
+
+    def _save_delegation_state(self, task: dict, conv_id: str, session, session_status: str, model: str, worker_id: str):
+        """Persist session metadata and checkpoint after successful delegation."""
+        project = task.get("project")
+        task_id = task.get("id")
+        task_type = task.get("task_type")
+        trace_id = task.get("trace_id")
+
+        proj_config = self._get_project_config(project)
         repo_url = proj_config.get("repository")
         default_branch = proj_config.get("default_branch") or "main"
-        
+
         self.runtime.sessions.save_session(
             project_id=project,
             conversation_id=conv_id,
-            workspace_path=workspace_path,
+            workspace_path=task.get("_workspace_path", ""),
             repository_url=repo_url,
             default_branch=default_branch,
             current_branch=f"task-{task_id}" if task_type == "feature" else default_branch,
-            status="ACTIVE"
+            status="ACTIVE",
         )
-        
-        # Save delegation state to SQLite (task checkpoint tracking)
+
+        if not session or session_status == "EXPIRED":
+            log_transition(
+                "SESSION_CREATED", "CREATED", task_id, project, trace_id,
+                conversation_id=conv_id,
+                branch=f"task-{task_id}" if task_type == "feature" else "main",
+            )
+
         now_str = datetime.datetime.now().isoformat()
         if self.checkpoint_manager:
             self.checkpoint_manager.save_delegation_state(
@@ -317,19 +273,87 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
                 delegated_at=now_str,
                 last_followup_at=now_str,
                 worker_model=model,
-                delegation_status="delegated"
+                delegation_status="delegated",
             )
 
-        # Update status to delegated in task file/Supabase
+    # ── Public interface ─────────────────────────────────────────────────────
+
+    def dispatch_task(self, task: dict, workspace_info: dict, worker_id: str) -> dict:
+        """Orchestrate Antigravity task dispatch using persistent sessions."""
+        project = task.get("project")
+        task_id = task.get("id")
+        task_type = task.get("task_type")
+        workspace_path = workspace_info.get("workspace")
+        trace_id = task.get("trace_id")
+
+        # Stash workspace_path for helpers that need it
+        task["_workspace_path"] = workspace_path
+
+        # 1. Project isolation check
+        self.validate_isolation(project, workspace_path)
+
+        # 2. Acquire database-backed workspace lock
+        if not self.runtime.sessions.acquire_lock(project, worker_id):
+            print(f"🔒 Workspace lock acquisition failed for project '{project}' (already locked by another worker).")
+            return {
+                "task_id": task_id,
+                "project": project,
+                "status": "BLOCKED",
+                "reason": "Workspace is currently locked by another worker.",
+            }
+
+        # 3. Resume from checkpoint if available
+        resume_result = self._resume_from_checkpoint(task, worker_id)
+        if resume_result is not None:
+            return resume_result
+
+        # 4. Git feature branch preparation (feature tasks only)
+        if task_type == "feature":
+            git_block = self._setup_git_branch(task, workspace_path, worker_id)
+            if git_block is not None:
+                return git_block
+
+        # 5. Load or create persistent conversation session
+        res, session, session_status, conv_id, model = self._create_or_resume_session(task)
+
+        if not res["success"]:
+            self.runtime.sessions.release_lock(project, worker_id)
+            error_reason = res.get("error") or "Unknown dispatch error"
+            return {
+                "task_id": task_id,
+                "project": project,
+                "status": "FAILED",
+                "summary": f"Failed to dispatch to Antigravity: {error_reason}",
+                "error": error_reason,
+            }
+
+        # 6. Extract conversation ID from response
+        new_conv_id = AntigravityClient.extract_conversation_id(res.get("response", {}))
+        if not new_conv_id:
+            new_conv_id = AntigravityClient.extract_conversation_id(res)
+
+        if new_conv_id:
+            conv_id = new_conv_id
+        elif not conv_id:
+            conv_id = f"missing-conv-id-{task_id}"
+
+        # 7. Save delegation state
+        self._save_delegation_state(task, conv_id, session, session_status, model, worker_id)
+
+        # 8. Update task source status
         result = {
             "task_id": task_id,
             "project": project,
             "status": "DELEGATED",
             "conversation_id": conv_id,
-            "summary": f"Task is successfully delegated to Antigravity conversation {conv_id}."
+            "summary": f"Task is successfully delegated to Antigravity conversation {conv_id}.",
         }
-        log_transition("ANTIGRAVITY_STARTED", "DELEGATED", task_id, project, task.get("trace_id"), conversation_id=conv_id, branch=f"task-{task_id}" if task_type == "feature" else "main")
+        log_transition(
+            "ANTIGRAVITY_STARTED", "DELEGATED", task_id, project, trace_id,
+            conversation_id=conv_id,
+            branch=f"task-{task_id}" if task_type == "feature" else "main",
+        )
         if self.task_source:
             self.task_source.update_task_status(task_id, "delegated", result)
-            
+
         return result

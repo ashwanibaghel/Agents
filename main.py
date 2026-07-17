@@ -24,10 +24,9 @@ from control.receipt_monitor import ReceiptMonitor
 from control.result_verifier import ResultVerifier
 from control.structured_logger import logger
 from control import error_codes
-from control.event_bus import event_bus, Event
-from control.audit_trail import audit_trail
 from control.metrics_manager import metrics_manager
 from control.backup_manager import BackupManager
+from control.telemetry import log_transition as _telem_log_transition
 import uuid
 
 
@@ -43,34 +42,21 @@ def log_transition(
     message=None,
     metadata=None
 ):
-    evt_data = {
-        "trace_id": trace_id,
-        "worker_id": logger.worker_id,
-        "task_id": task_id,
-        "project_id": project_id,
-        "conversation_id": conversation_id,
-        "branch": branch,
-        "status": status,
-        "error_code": error_code,
-        "message": message,
-        "metadata": metadata or {}
-    }
-    event_bus.publish(Event(event_type, evt_data))
-    audit_trail.append(
+    """Worker-level log_transition: delegates core telemetry to control.telemetry,
+    then records metrics for significant lifecycle events."""
+    _telem_log_transition(
         event_type=event_type,
         status=status,
-        trace_id=trace_id,
-        worker_id=logger.worker_id,
         task_id=task_id,
         project_id=project_id,
+        trace_id=trace_id,
         conversation_id=conversation_id,
         branch=branch,
         error_code=error_code,
         message=message,
-        metadata=metadata
+        metadata=metadata,
     )
-    
-    # Record metrics for transitions
+    # Record metrics for significant lifecycle events
     if trace_id:
         if event_type == "TASK_CLAIMED":
             metrics_manager.start_task_metric(trace_id, task_id, project_id)

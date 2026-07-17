@@ -851,7 +851,91 @@ def get_dashboard_ui():
                 </tbody>
             </table>
         </div>
-    </div>
+        </div>
+
+        <!-- Operations Section (V3.2 Sprint 6) -->
+        <div class="latest-completed-section" id="ops-section">
+            <h2>⚙️ Operations Dashboard (V3.2)</h2>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin-top:1rem;">
+
+                <!-- Worker Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">🤖 Worker</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody id="ops-worker-body">
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Status</td><td id="ops-w-status" style="text-align:right;font-weight:600;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Worker ID</td><td id="ops-w-id" style="text-align:right;font-family:monospace;font-size:0.78rem;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Uptime</td><td id="ops-w-uptime" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Startup Count</td><td id="ops-w-startups" style="text-align:right;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Queue Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">📋 Queue</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Pending</td><td id="ops-q-pending" style="text-align:right;font-weight:600;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Running</td><td id="ops-q-running" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Completed</td><td id="ops-q-done" style="text-align:right;color:#10b981;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Failed</td><td id="ops-q-failed" style="text-align:right;color:#ef4444;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Blocked</td><td id="ops-q-blocked" style="text-align:right;color:#f59e0b;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Sessions Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">💬 Sessions</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Active Sessions</td><td id="ops-s-active" style="text-align:right;font-weight:600;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Reused</td><td id="ops-s-reused" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Expiries</td><td id="ops-s-expired" style="text-align:right;color:#f59e0b;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Git Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">🔀 Git</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Git Success Rate</td><td id="ops-git-rate" style="text-align:right;font-weight:600;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Failures</td><td id="ops-git-fail" style="text-align:right;color:#ef4444;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Backup Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">💾 Backup</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Latest Backup</td><td id="ops-bk-id" style="text-align:right;font-family:monospace;font-size:0.76rem;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Backup Age</td><td id="ops-bk-age" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Total Backups</td><td id="ops-bk-count" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Backup Failures</td><td id="ops-bk-fail" style="text-align:right;color:#f59e0b;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Validator Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">✅ Validator</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Readiness Score</td><td id="ops-vl-score" style="text-align:right;font-weight:600;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Status</td><td id="ops-vl-status" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Warnings</td><td id="ops-vl-warn" style="text-align:right;color:#f59e0b;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Failures</td><td id="ops-vl-fail" style="text-align:right;color:#ef4444;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+            </div>
+        </div>
 
     <div class="latest-completed-section">
         <h2>📊 Recent Finished Tasks</h2>
@@ -1224,6 +1308,54 @@ def get_dashboard_ui():
                 } else {
                     metricsTbody.innerHTML = `<tr><td colspan="2" style="text-align: center; color: var(--text-muted);">No metrics data available</td></tr>`;
                 }
+                // Render Operations Section (V3.2 S6) — consumes data already fetched, no extra API calls
+                try {
+                    // Worker panel
+                    const wStatus = data.worker_status || 'OFFLINE';
+                    document.getElementById('ops-w-status').innerText = wStatus;
+                    document.getElementById('ops-w-status').style.color = wStatus === 'ONLINE' ? '#10b981' : '#ef4444';
+                    document.getElementById('ops-w-uptime').innerText = data.uptime ? formatDuration(data.uptime) : '—';
+                    const wm = (data.metrics && data.metrics.worker_metrics) ? data.metrics.worker_metrics : {};
+                    document.getElementById('ops-w-id').innerText = wm.worker_id || '—';
+                    document.getElementById('ops-w-startups').innerText = wm.startup_count || '—';
+
+                    // Queue panel
+                    document.getElementById('ops-q-pending').innerText = data.inbox || 0;
+                    document.getElementById('ops-q-running').innerText = data.working || 0;
+                    document.getElementById('ops-q-done').innerText = data.done || 0;
+                    document.getElementById('ops-q-failed').innerText = data.failed || 0;
+                    document.getElementById('ops-q-blocked').innerText = data.blocked || 0;
+
+                    // Sessions panel
+                    const sessions = data.sessions || [];
+                    const activeSessions = sessions.filter(s => s.status === 'ACTIVE').length;
+                    const rm = (data.metrics && data.metrics.reliability_metrics) ? data.metrics.reliability_metrics : {};
+                    const reuse = (data.metrics && data.metrics.reuse_metrics) ? data.metrics.reuse_metrics : {};
+                    document.getElementById('ops-s-active').innerText = activeSessions;
+                    document.getElementById('ops-s-reused').innerText = reuse.conversation_reuses !== undefined ? reuse.conversation_reuses : '—';
+                    document.getElementById('ops-s-expired').innerText = rm.session_expiry_count || 0;
+
+                    // Git panel
+                    const succ = (data.metrics && data.metrics.success_metrics) ? data.metrics.success_metrics : {};
+                    document.getElementById('ops-git-rate').innerText = succ.git_success_rate !== undefined ? (succ.git_success_rate * 100).toFixed(1) + '%' : '—';
+                    document.getElementById('ops-git-fail').innerText = rm.git_failures || 0;
+
+                    // Backup panel
+                    const bkm = (data.metrics && data.metrics.reliability_metrics) ? data.metrics.reliability_metrics : {};
+                    document.getElementById('ops-bk-id').innerText = bkm.latest_backup_id || 'None';
+                    document.getElementById('ops-bk-age').innerText = bkm.backup_age_seconds !== undefined ? (bkm.backup_age_seconds / 60).toFixed(0) + 'm ago' : '—';
+                    document.getElementById('ops-bk-count').innerText = bkm.backup_count !== undefined ? bkm.backup_count : '—';
+                    document.getElementById('ops-bk-fail').innerText = bkm.backup_failure_count || 0;
+
+                    // Validator panel — best-effort from metrics
+                    const vl = (data.metrics && data.metrics.validator_status) ? data.metrics.validator_status : {};
+                    document.getElementById('ops-vl-score').innerText = vl.score !== undefined ? (vl.score * 100).toFixed(1) + '%' : '—';
+                    document.getElementById('ops-vl-status').innerText = vl.status || '—';
+                    document.getElementById('ops-vl-warn').innerText = vl.warnings !== undefined ? vl.warnings : '—';
+                    document.getElementById('ops-vl-fail').innerText = vl.failures !== undefined ? vl.failures : '—';
+                } catch(opsErr) {
+                    console.warn('Ops section render error:', opsErr);
+                }
             } catch (err) {
                 console.error("Dashboard pull error:", err);
             }
@@ -1456,11 +1588,150 @@ def get_dashboard_data():
         }
 
 
+@app.get("/diagnostics", include_in_schema=True)
+def get_diagnostics():
+    """
+    Read-only system diagnostics snapshot.
+    Returns cached/available runtime information only.
+    Never touches Git (writes), creates sessions, runs validator, creates backups, or writes anything.
+    """
+    import sys
+    import platform
+    import datetime as _dt
+
+    diag = {}
+
+    # 1. Worker identity + metrics summary (read cached metrics report)
+    try:
+        m = metrics_manager.get_metrics_report()
+        wm = m.get("worker_metrics", {})
+        diag["worker"] = {
+            "worker_id":      wm.get("worker_id", ""),
+            "startup_count":  wm.get("startup_count", 0),
+            "uptime_s":       wm.get("worker_uptime", 0),
+            "last_heartbeat": wm.get("last_heartbeat", None),
+        }
+        diag["metrics_summary"] = {
+            "total_tasks":           m.get("task_metrics", {}).get("total_tasks", 0),
+            "completed":             m.get("task_metrics", {}).get("completed_tasks", 0),
+            "failed":                m.get("task_metrics", {}).get("failed_tasks", 0),
+            "blocked":               m.get("task_metrics", {}).get("blocked_tasks", 0),
+            "git_success_rate":      m.get("success_metrics", {}).get("git_success_rate", 0),
+            "verifier_success_rate": m.get("success_metrics", {}).get("verifier_success_rate", 0),
+            "backup_failure_count":  m.get("reliability_metrics", {}).get("backup_failure_count", 0),
+        }
+    except Exception as e:
+        diag["worker"] = {"error": str(e)}
+        diag["metrics_summary"] = {}
+
+    # 2. Configuration (read-only file reads)
+    try:
+        from control.config_manager import ConfigManager
+        cm = ConfigManager()
+        diag["configuration"] = {
+            "version":         cm.get_version(),
+            "active_projects": list(cm.projects_config.get("projects", {}).keys()),
+        }
+        diag["feature_flags"] = {
+            flag: cm.get_feature_flag(flag)
+            for flag in ["persistent_sessions", "structured_logging", "metrics",
+                         "auto_push", "chaos_testing", "backup"]
+        }
+    except Exception as e:
+        diag["configuration"] = {"error": str(e)}
+        diag["feature_flags"] = {}
+
+    # 3. Environment summary (read-only)
+    diag["environment"] = {
+        "python_version": sys.version,
+        "platform":       platform.platform(),
+        "cwd":            os.getcwd(),
+        "timestamp":      _dt.datetime.utcnow().isoformat() + "Z",
+    }
+
+    # 4. Component versions
+    diag["component_versions"] = {
+        "bridge_server":        "3.2",
+        "structured_logger":    "3.2",
+        "audit_trail":          "3.2",
+        "metrics_manager":      "3.2",
+        "health_monitor":       "3.2",
+        "backup_manager":       "3.2",
+        "production_validator": "3.2",
+        "telemetry":            "3.2",
+    }
+
+    # 5. Recent audit events (read-only SQLite SELECT)
+    try:
+        from control.audit_trail import audit_trail
+        recent = audit_trail.get_recent(limit=10)
+        diag["recent_audit_events"] = recent
+    except Exception as e:
+        diag["recent_audit_events"] = {"error": str(e)}
+
+    # 6. Backup status (read-only directory scan + manifest reads)
+    try:
+        backup_dir = "state/backups"
+        backups = []
+        if os.path.exists(backup_dir):
+            for entry in sorted(os.listdir(backup_dir), reverse=True)[:5]:
+                manifest_path = os.path.join(backup_dir, entry, "manifest.json")
+                if os.path.exists(manifest_path):
+                    with open(manifest_path, "r", encoding="utf-8") as _f:
+                        manifest = json.load(_f)
+                    backups.append({
+                        "backup_id":  manifest.get("backup_id", entry),
+                        "created_at": manifest.get("created_at"),
+                        "label":      manifest.get("label"),
+                        "file_count": len(manifest.get("files", [])),
+                    })
+        diag["backup_status"] = {
+            "total_backups":  len(os.listdir(backup_dir)) if os.path.exists(backup_dir) else 0,
+            "recent_backups": backups,
+        }
+    except Exception as e:
+        diag["backup_status"] = {"error": str(e)}
+
+    # 7. Git status (read-only git commands — no writes)
+    try:
+        import subprocess
+        branch_res = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=3
+        )
+        commit_res = subprocess.run(
+            ["git", "log", "-1", "--format=%h %s"],
+            capture_output=True, text=True, timeout=3
+        )
+        diag["git_status"] = {
+            "current_branch": branch_res.stdout.strip() if branch_res.returncode == 0 else "unknown",
+            "last_commit":    commit_res.stdout.strip() if commit_res.returncode == 0 else "unknown",
+        }
+    except Exception as e:
+        diag["git_status"] = {"error": str(e)}
+
+    # 8. Validator cache (read cached result — never runs validator)
+    try:
+        validator_cache_path = "state/validator_cache.json"
+        if os.path.exists(validator_cache_path):
+            with open(validator_cache_path, "r", encoding="utf-8") as _f:
+                diag["validator_status"] = json.load(_f)
+        else:
+            diag["validator_status"] = {
+                "note": "No cached result. Run production_check.py to populate."
+            }
+    except Exception as e:
+        diag["validator_status"] = {"error": str(e)}
+
+    return diag
+
+
 @app.get("/health")
 def health():
     from control.health_monitor import HealthMonitor
     monitor = HealthMonitor()
     return monitor.get_system_health()
+
 
 
 @app.get("/metrics")

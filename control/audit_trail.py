@@ -143,5 +143,25 @@ class AuditTrailManager:
                     records.append(rec)
         return records
 
+    def get_recent(self, limit: int = 10) -> List[Dict[str, Any]]:
+        """Returns the most recent audit trail records (newest first). Read-only."""
+        query = (
+            "SELECT id, timestamp, trace_id, worker_id, task_id, project_id, "
+            "conversation_id, branch, event_type, status, error_code, message "
+            "FROM audit_trail ORDER BY id DESC LIMIT ?"
+        )
+        records = []
+        try:
+            with self._lock:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    cursor.execute(query, (limit,))
+                    for row in cursor.fetchall():
+                        records.append(dict(row))
+        except Exception:
+            pass
+        return records
+
 # Global singleton instance
 audit_trail = AuditTrailManager()
