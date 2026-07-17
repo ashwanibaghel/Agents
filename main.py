@@ -27,6 +27,7 @@ from control import error_codes
 from control.event_bus import event_bus, Event
 from control.audit_trail import audit_trail
 from control.metrics_manager import metrics_manager
+from control.backup_manager import BackupManager
 import uuid
 
 
@@ -543,6 +544,20 @@ def main():
             # Idle, show heartbeat debug log
             if not run_once:
                 logger.debug("Worker idle - polling for tasks", step="POLL")
+
+        # Post-dispatch backup (non-blocking, best-effort)
+        if config_mgr.get_feature_flag("backup"):
+            try:
+                _backup_mgr = BackupManager(
+                    metrics_manager=metrics_manager,
+                    logger=logger,
+                )
+                _backup_result = _backup_mgr.run_backup("post_dispatch")
+                if _backup_result["success"]:
+                    _backup_mgr.cleanup_old_backups()
+            except Exception as _bk_err:
+                logger.warning(f"Post-dispatch backup skipped: {_bk_err}", step="BACKUP", error_code=error_codes.BACKUP_001)
+
 
         if run_once:
             break

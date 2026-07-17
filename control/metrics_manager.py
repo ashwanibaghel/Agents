@@ -62,6 +62,7 @@ class MetricsManager:
         self._safe_execute(lambda conn: conn.execute("INSERT OR IGNORE INTO reliability_counters (counter_name, value) VALUES ('verifier_failures', 0)"))
         self._safe_execute(lambda conn: conn.execute("INSERT OR IGNORE INTO reliability_counters (counter_name, value) VALUES ('git_failures', 0)"))
         self._safe_execute(lambda conn: conn.execute("INSERT OR IGNORE INTO reliability_counters (counter_name, value) VALUES ('retry_count', 0)"))
+        self._safe_execute(lambda conn: conn.execute("INSERT OR IGNORE INTO reliability_counters (counter_name, value) VALUES ('backup_failure_count', 0)"))
 
     def _safe_execute(self, op_func) -> bool:
         """

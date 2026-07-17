@@ -35,3 +35,4 @@ NETWORK_001 = "NETWORK_001"  # Network socket connection timeout or DNS resoluti
 UNKNOWN_001 = "UNKNOWN_001"  # Uncaught exception
 METRICS_001 = "METRICS_001"  # Metrics database persistence failed
 HEALTH_001 = "HEALTH_001"    # Health check execution failed
+BACKUP_001 = "BACKUP_001"    # Backup operation failed
