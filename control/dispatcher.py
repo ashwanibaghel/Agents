@@ -1,6 +1,49 @@
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from control.workspace_manager import WorkspaceManager
 from brains.scripted_brain import ScriptedBrain
+from control.event_bus import event_bus, Event
+from control.audit_trail import audit_trail
+from control.structured_logger import logger
+
+
+def log_transition(
+    event_type: str,
+    status: str,
+    task_id: str,
+    project_id: str,
+    trace_id: str,
+    conversation_id=None,
+    branch=None,
+    error_code=None,
+    message=None,
+    metadata=None
+):
+    evt_data = {
+        "trace_id": trace_id,
+        "worker_id": logger.worker_id,
+        "task_id": task_id,
+        "project_id": project_id,
+        "conversation_id": conversation_id,
+        "branch": branch,
+        "status": status,
+        "error_code": error_code,
+        "message": message,
+        "metadata": metadata or {}
+    }
+    event_bus.publish(Event(event_type, evt_data))
+    audit_trail.append(
+        event_type=event_type,
+        status=status,
+        trace_id=trace_id,
+        worker_id=logger.worker_id,
+        task_id=task_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        branch=branch,
+        error_code=error_code,
+        message=message,
+        metadata=metadata
+    )
 
 
 class Dispatcher:
@@ -19,7 +62,9 @@ class Dispatcher:
             try:
                 workspace_info = self.workspace_manager.prepare_workspace(project_id)
                 agent.set_workspace(workspace_info)
+                log_transition("WORKSPACE_PREPARED", "PREPARED", task["id"], project_id, task.get("trace_id"))
             except Exception as prep_error:
+                log_transition("WORKSPACE_PREPARED", "FAILED", task["id"], project_id, task.get("trace_id"), error_code="CONFIG_002", message=str(prep_error))
                 agent.block_task(str(prep_error))
                 return {
                     "task_id": task["id"],

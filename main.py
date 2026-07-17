@@ -24,7 +24,49 @@ from control.receipt_monitor import ReceiptMonitor
 from control.result_verifier import ResultVerifier
 from control.structured_logger import logger
 from control import error_codes
+from control.event_bus import event_bus, Event
+from control.audit_trail import audit_trail
 import uuid
+
+
+def log_transition(
+    event_type: str,
+    status: str,
+    task_id: str,
+    project_id: str,
+    trace_id: str,
+    conversation_id=None,
+    branch=None,
+    error_code=None,
+    message=None,
+    metadata=None
+):
+    evt_data = {
+        "trace_id": trace_id,
+        "worker_id": logger.worker_id,
+        "task_id": task_id,
+        "project_id": project_id,
+        "conversation_id": conversation_id,
+        "branch": branch,
+        "status": status,
+        "error_code": error_code,
+        "message": message,
+        "metadata": metadata or {}
+    }
+    event_bus.publish(Event(event_type, evt_data))
+    audit_trail.append(
+        event_type=event_type,
+        status=status,
+        trace_id=trace_id,
+        worker_id=logger.worker_id,
+        task_id=task_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        branch=branch,
+        error_code=error_code,
+        message=message,
+        metadata=metadata
+    )
 
 
 def load_config():
@@ -204,11 +246,14 @@ def main():
                 t_id = f"trace-{str(uuid.uuid4())[:8]}"
                 trace_ids[task.task_id] = t_id
                 logger.info(f"Claimed task: {task.task_id}", trace_id=t_id, task_id=task.task_id, project_id=task.project, step="CLAIMED")
+                log_transition("TASK_CLAIMED", "CLAIMED", task.task_id, task.project, t_id)
 
                 # Clear any stale checkpoint from a previous run of this task.
                 checkpoint_manager.delete_checkpoint(task.task_id)
                 claimed_tasks.append(task)
-                mapped_agent_tasks.append(TaskParser.to_agent_format(task))
+                agent_task = TaskParser.to_agent_format(task)
+                agent_task["trace_id"] = t_id
+                mapped_agent_tasks.append(agent_task)
 
         # 4. Resume active tasks (delegated/claimed)
         if use_supabase:
@@ -220,8 +265,11 @@ def main():
                             t_id = trace_ids.get(task.task_id) or f"trace-{str(uuid.uuid4())[:8]}"
                             trace_ids[task.task_id] = t_id
                             logger.info(f"Resumed active task: {task.task_id}", trace_id=t_id, task_id=task.task_id, project_id=task.project, step="CLAIMED")
+                            log_transition("TASK_CLAIMED", "RESUMED", task.task_id, task.project, t_id)
                             claimed_tasks.append(task)
-                            mapped_agent_tasks.append(TaskParser.to_agent_format(task))
+                            agent_task = TaskParser.to_agent_format(task)
+                            agent_task["trace_id"] = t_id
+                            mapped_agent_tasks.append(agent_task)
             except Exception as e:
                 logger.error(f"Failed to fetch active tasks: {e}", error_code=error_codes.SUPABASE_002, step="FETCH")
         else:
@@ -234,8 +282,13 @@ def main():
                                 data = yaml.safe_load(f)
                             task = TaskParser.from_dict(data)
                             if task.status == "delegated" and task.project in active_projects:
+                                t_id = trace_ids.get(task.task_id) or f"trace-{str(uuid.uuid4())[:8]}"
+                                trace_ids[task.task_id] = t_id
+                                log_transition("TASK_CLAIMED", "RESUMED", task.task_id, task.project, t_id)
                                 claimed_tasks.append(task)
-                                mapped_agent_tasks.append(TaskParser.to_agent_format(task))
+                                agent_task = TaskParser.to_agent_format(task)
+                                agent_task["trace_id"] = t_id
+                                mapped_agent_tasks.append(agent_task)
                         except Exception:
                             pass
 
@@ -290,10 +343,12 @@ def main():
                     if receipt_info and receipt_info.get("success"):
                         receipt_status = receipt_info.get("status")
                         receipt_data = receipt_info.get("receipt_data", {})
+                        log_transition("ANTIGRAVITY_COMPLETED", receipt_status, task_id, project, trace_ids.get(task_id), conversation_id=conv_id)
                         
                         if receipt_status == "DONE":
                             workspace_info = agents[project].workspace_info
                             print(f"🧐 Running independent verification on workspace for task {task_id}...")
+                            log_transition("VERIFICATION_STARTED", "RUNNING", task_id, project, trace_ids.get(task_id), conversation_id=conv_id)
                             
                             original_agent_task = next((t for t in mapped_agent_tasks if t.get("id") == task_id), None)
                             verified, err_msg, verify_details = ResultVerifier.verify_result(
@@ -303,16 +358,20 @@ def main():
                             )
                             
                             if verified:
+                                log_transition("VERIFICATION_PASSED", "PASSED", task_id, project, trace_ids.get(task_id), conversation_id=conv_id)
                                 result["status"] = "DONE"
                                 summary_text = receipt_data.get("summary") or ""
                                 task_type = original_agent_task.get("task_type") if original_agent_task else "code"
                                 if task_type == "feature":
                                     print(f"🚀 Publishing verified changes to Git for task {task_id}...")
+                                    log_transition("GIT_CHECKOUT", "CHECKOUT", task_id, project, trace_ids.get(task_id), conversation_id=conv_id, branch=f"task-{task_id}")
                                     try:
                                         from control.project_runtime import ProjectRuntimeManager
                                         runtime = ProjectRuntimeManager()
                                         git_res = runtime.git.publish_feature_branch(workspace_info.get("workspace"), task_id)
                                         if git_res["success"]:
+                                            log_transition("GIT_COMMIT", "COMMITTED", task_id, project, trace_ids.get(task_id), conversation_id=conv_id, branch=git_res['branch'], metadata={"commit_sha": git_res['commit_sha']})
+                                            log_transition("GIT_PUSH", "PUSHED", task_id, project, trace_ids.get(task_id), conversation_id=conv_id, branch=git_res['branch'], metadata={"github_url": git_res['github_url']})
                                             summary_text += f"\n\n### 🛡️ VERIFIED FEATURE PROOF (V3.1)\n"
                                             summary_text += f"- **Current Branch**: `{git_res['branch']}`\n"
                                             summary_text += f"- **Commit Hash**: `{git_res['commit_sha']}`\n"
@@ -350,6 +409,7 @@ def main():
                                     pass
                             else:
                                 logger.error(f"Independent verification failed: {err_msg}", error_code=error_codes.VERIFIER_002, trace_id=trace_ids.get(task_id), task_id=task_id, project_id=project, step="VERIFYING")
+                                log_transition("VERIFICATION_FAILED", "FAILED", task_id, project, trace_ids.get(task_id), conversation_id=conv_id, error_code=error_codes.VERIFIER_002, message=err_msg)
                                 result["status"] = "BLOCKED"
                                 result["summary"] = f"Independent Verification Failed: {err_msg}"
                         elif receipt_status == "BLOCKED":
@@ -402,6 +462,7 @@ def main():
 
                 t_id = trace_ids.get(task_id)
                 if status == "DONE":
+                    log_transition("TASK_COMPLETED", "DONE", task_id, project, t_id, message=summary)
                     logger.info(
                         f"Task completed successfully: {project} -> DONE. Summary: {summary} | Actions: {actions_count} | Files changed: {files_changed_count} | Validation: {validation_info}",
                         trace_id=t_id,
@@ -420,6 +481,7 @@ def main():
                         status="DELEGATED"
                     )
                 elif status == "BLOCKED":
+                    log_transition("TASK_BLOCKED", "BLOCKED", task_id, project, t_id, error_code=error_codes.VERIFIER_002, message=summary)
                     logger.warning(
                         f"Task blocked during run: {project} -> BLOCKED. Reason: {summary}",
                         error_code=error_codes.VERIFIER_002,
@@ -430,6 +492,7 @@ def main():
                         status="BLOCKED"
                     )
                 elif status == "FAILED":
+                    log_transition("TASK_FAILED", "FAILED", task_id, project, t_id, error_code=error_codes.WORKER_002, message=summary)
                     logger.error(
                         f"Task failed during execution: {project} -> FAILED. Error: {summary}",
                         error_code=error_codes.WORKER_002,

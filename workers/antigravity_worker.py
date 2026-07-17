@@ -2,6 +2,48 @@ import os
 import datetime
 from workers.antigravity_client import AntigravityClient
 from control.project_runtime import ProjectRuntimeManager
+from control.event_bus import event_bus, Event
+from control.audit_trail import audit_trail
+from control.structured_logger import logger
+
+def log_transition(
+    event_type: str,
+    status: str,
+    task_id: str,
+    project_id: str,
+    trace_id: str,
+    conversation_id=None,
+    branch=None,
+    error_code=None,
+    message=None,
+    metadata=None
+):
+    evt_data = {
+        "trace_id": trace_id,
+        "worker_id": logger.worker_id,
+        "task_id": task_id,
+        "project_id": project_id,
+        "conversation_id": conversation_id,
+        "branch": branch,
+        "status": status,
+        "error_code": error_code,
+        "message": message,
+        "metadata": metadata or {}
+    }
+    event_bus.publish(Event(event_type, evt_data))
+    audit_trail.append(
+        event_type=event_type,
+        status=status,
+        trace_id=trace_id,
+        worker_id=logger.worker_id,
+        task_id=task_id,
+        project_id=project_id,
+        conversation_id=conversation_id,
+        branch=branch,
+        error_code=error_code,
+        message=message,
+        metadata=metadata
+    )
 
 class AntigravityWorker:
     def __init__(self, checkpoint_manager=None, task_source=None, client=None, db_path=None):
@@ -177,7 +219,9 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
                 self.runtime.workspaces.verify_or_update_workspace(project, repo_url, workspace_path)
                 
             res_git = self.runtime.git.prepare_feature_branch(workspace_path, task_id)
-            if not res_git["success"]:
+            if res_git["success"]:
+                log_transition("GIT_CHECKOUT", "CHECKOUT", task_id, project, task.get("trace_id"), branch=f"task-{task_id}")
+            else:
                 # Release lock on failure
                 self.runtime.sessions.release_lock(project, worker_id)
                 print(f"❌ Git prepare branch failed: {res_git['error']}")
@@ -209,6 +253,7 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
         if conv_id:
             # Resume existing persistent conversation
             print(f"🔄 Resuming persistent conversation {conv_id} for project {project}...")
+            log_transition("SESSION_REUSED", "REUSED", task_id, project, task.get("trace_id"), conversation_id=conv_id, branch=f"task-{task_id}" if task_type == "feature" else "main")
             res = self.client.send_message(conv_id, full_prompt)
         else:
             # Create a replacement conversation
@@ -234,6 +279,8 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
             
         if new_conv_id:
             conv_id = new_conv_id
+            if not session or session_status == "EXPIRED":
+                log_transition("SESSION_CREATED", "CREATED", task_id, project, task.get("trace_id"), conversation_id=conv_id, branch=f"task-{task_id}" if task_type == "feature" else "main")
         elif not conv_id:
             conv_id = f"missing-conv-id-{task_id}"
             
@@ -276,6 +323,7 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
             "conversation_id": conv_id,
             "summary": f"Task is successfully delegated to Antigravity conversation {conv_id}."
         }
+        log_transition("ANTIGRAVITY_STARTED", "DELEGATED", task_id, project, task.get("trace_id"), conversation_id=conv_id, branch=f"task-{task_id}" if task_type == "feature" else "main")
         if self.task_source:
             self.task_source.update_task_status(task_id, "delegated", result)
             
