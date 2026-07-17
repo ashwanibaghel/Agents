@@ -25,6 +25,39 @@ class CheckpointManager:
                     checkpoint_data TEXT
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_sessions (
+                    project_id TEXT PRIMARY KEY,
+                    conversation_id TEXT,
+                    workspace_path TEXT,
+                    repository_url TEXT,
+                    default_branch TEXT,
+                    current_branch TEXT,
+                    last_commit TEXT,
+                    last_activity TEXT,
+                    status TEXT,
+                    locked_by TEXT,
+                    locked_at TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_memories (
+                    project_id TEXT PRIMARY KEY,
+                    architecture TEXT,
+                    pending_todos TEXT,
+                    known_bugs TEXT,
+                    recent_decisions TEXT,
+                    coding_style TEXT,
+                    framework TEXT,
+                    backend_notes TEXT,
+                    oracle_notes TEXT,
+                    design_rules TEXT,
+                    owner_instructions TEXT,
+                    updated_at TEXT
+                )
+            """)
             conn.commit()
             
             # Programmatically migrate/add columns if they are missing

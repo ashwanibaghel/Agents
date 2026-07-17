@@ -787,6 +787,30 @@ def get_dashboard_ui():
         </div>
     </div>
 
+    <div class="latest-completed-section" style="margin-bottom: 2rem;">
+        <h2>🔄 Persistent Runtime Sessions (V3.1)</h2>
+        <table class="completed-table">
+            <thead>
+                <tr>
+                    <th>Project</th>
+                    <th>Conversation ID</th>
+                    <th>Status</th>
+                    <th>Workspace</th>
+                    <th>Branch</th>
+                    <th>Last Commit</th>
+                    <th>Memory Size</th>
+                    <th>Lock Owner</th>
+                    <th>Last Updated</th>
+                </tr>
+            </thead>
+            <tbody id="sessions-table-body">
+                <tr>
+                    <td colspan="9" style="text-align: center; color: var(--text-muted); font-style: italic;">No active sessions loaded</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
     <div class="latest-completed-section">
         <h2>📊 Recent Finished Tasks</h2>
         <table class="completed-table">
@@ -1066,6 +1090,32 @@ def get_dashboard_ui():
                         `;
                     }).join('');
                 }
+
+                // Render Persistent Sessions Table
+                const sessionsTbody = document.getElementById('sessions-table-body');
+                const sessionsList = data.sessions || [];
+                if (sessionsList.length === 0) {
+                    sessionsTbody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-muted); font-style: italic;">No active sessions loaded</td></tr>`;
+                } else {
+                    sessionsTbody.innerHTML = sessionsList.map(s => {
+                        const statusClass = s.status.toLowerCase();
+                        const updatedTime = s.updated_at ? new Date(s.updated_at).toLocaleString() : 'N/A';
+                        const lockText = s.locked_by ? `<span style="color: #f59e0b; font-weight: 500;">🔒 ${s.locked_by}</span>` : '<span style="color: #10b981;">🔓 None</span>';
+                        return `
+                            <tr>
+                                <td><span class="project-badge ${s.project_id}">${s.project_id}</span></td>
+                                <td style="font-family: monospace; font-size: 0.85rem; color: #818cf8;">${s.conversation_id}</td>
+                                <td><span class="status-badge ${statusClass}">${s.status}</span></td>
+                                <td style="font-size: 0.8rem; font-family: monospace; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.workspace_path || 'N/A'}</td>
+                                <td style="font-family: monospace; color: #fb7185;">${s.current_branch || 'N/A'}</td>
+                                <td style="font-family: monospace; font-size: 0.8rem; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.last_commit || 'N/A'}</td>
+                                <td style="text-align: center; font-weight: 600; color: #a78bfa;">${s.memory_size} fields</td>
+                                <td>${lockText}</td>
+                                <td>${updatedTime}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                }
             } catch (err) {
                 console.error("Dashboard pull error:", err);
             }
@@ -1202,6 +1252,50 @@ def get_dashboard_data():
         completed_statuses = ["done", "blocked", "failed"]
         latest_completed = [t for t in tasks if (t.get("status", "").lower() in completed_statuses) and (t.get("project") != "system")][:5]
 
+        # 1.5 Fetch persistent project sessions
+        sessions = []
+        try:
+            db_path = "state/task_checkpoints.db"
+            if os.path.exists(db_path):
+                import sqlite3
+                with sqlite3.connect(db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT project_id, conversation_id, workspace_path, repository_url, 
+                               default_branch, current_branch, last_commit, last_activity, status, 
+                               locked_by, locked_at, updated_at
+                        FROM project_sessions
+                    """)
+                    for row in cursor.fetchall():
+                        mem_size = 0
+                        try:
+                            cursor2 = conn.cursor()
+                            cursor2.execute("SELECT architecture, pending_todos, known_bugs, recent_decisions, coding_style, framework, backend_notes, oracle_notes, design_rules, owner_instructions FROM project_memories WHERE project_id = ?", (row["project_id"],))
+                            mem_row = cursor2.fetchone()
+                            if mem_row:
+                                mem_size = sum(1 for val in mem_row if val and str(val).strip())
+                        except Exception:
+                            pass
+                            
+                        sessions.append({
+                            "project_id": row["project_id"],
+                            "conversation_id": row["conversation_id"],
+                            "workspace_path": row["workspace_path"],
+                            "repository_url": row["repository_url"],
+                            "default_branch": row["default_branch"],
+                            "current_branch": row["current_branch"],
+                            "last_commit": row["last_commit"],
+                            "last_activity": row["last_activity"],
+                            "status": row["status"],
+                            "locked_by": row["locked_by"],
+                            "locked_at": row["locked_at"],
+                            "memory_size": mem_size,
+                            "updated_at": row["updated_at"]
+                        })
+        except Exception as e:
+            print(f"⚠️ Failed to fetch project sessions: {e}")
+
         return {
             "worker_status": worker_status,
             "heartbeat": heartbeat,
@@ -1213,6 +1307,7 @@ def get_dashboard_data():
             "failed": failed_count,
             "latest_completed": latest_completed,
             "uptime": uptime,
+            "sessions": sessions,
             "lists": {
                 "inbox": inbox_list[:10],
                 "working": working_list[:10],

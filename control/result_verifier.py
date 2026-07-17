@@ -68,20 +68,21 @@ class ResultVerifier:
             original_branch = None
             if task_type == "feature":
                 import subprocess
+                task_branch = f"task-{task_id}"
                 res_branches = TerminalTool.run_command(workspace_path, "git branch --list")
                 if not res_branches.get("success"):
                     return False, f"Failed to list branches: {res_branches.get('error')}", {}
                 
                 branches_output = res_branches.get("output", "")
-                task_branch = None
+                has_branch = False
                 for line in branches_output.splitlines():
                     b_name = line.replace("*", "").strip()
-                    if task_id.lower() in b_name.lower():
-                        task_branch = b_name
+                    if b_name == task_branch:
+                        has_branch = True
                         break
                         
-                if not task_branch:
-                    return False, f"No git branch found containing task ID '{task_id}'.", {}
+                if not has_branch:
+                    return False, f"No git branch found with exact name '{task_branch}'.", {}
                 
                 # Get current branch to restore later
                 res_curr = TerminalTool.run_command(workspace_path, "git rev-parse --abbrev-ref HEAD")
@@ -124,17 +125,18 @@ class ResultVerifier:
                         path_part = line[3:].strip().strip('"').replace("\\", "/")
                         git_modified_paths.append(path_part)
 
-                # For feature tasks, also get committed files on the task branch compared to main
+                # For feature tasks, also get committed files on current branch vs main/master
                 if task_type == "feature":
+                    # Try main (allowlisted), fall back to master
                     res_branch_diff = TerminalTool.run_command(workspace_path, "git diff --name-only main...")
                     if not res_branch_diff.get("success") or not res_branch_diff.get("output", "").strip():
                         res_branch_diff = TerminalTool.run_command(workspace_path, "git diff --name-only master...")
-                        
                     if res_branch_diff.get("success"):
                         diff_output = res_branch_diff.get("output", "")
                         for line in diff_output.splitlines():
                             if line.strip():
                                 git_modified_paths.append(line.strip().replace("\\", "/"))
+
                 
                 # De-duplicate modified paths
                 git_modified_paths = list(set(git_modified_paths))

@@ -3,6 +3,9 @@ import yaml
 import os
 import time
 import signal
+from dotenv import load_dotenv
+
+load_dotenv()
 
 os.environ["GIT_TERMINAL_PROMPT"] = "0"
 os.environ["GIT_SSH_COMMAND"] = "ssh -o BatchMode=yes"
@@ -31,10 +34,24 @@ def load_config():
 
 
 def main():
-    config = load_config()
+    from control.config_manager import ConfigManager
+    config_mgr = ConfigManager()
+    is_valid, errors = config_mgr.validate_startup()
+    if not is_valid:
+        print("\n❌ STARTUP CONFIGURATION VALIDATION FAILED:")
+        for err in errors:
+            print(f"   - {err}")
+        sys.exit(1)
+
+    config = config_mgr.projects_config
 
     print("\n🤖 ASHWANI AGENT COMPANY")
     print("👑 BOSS: ASHWANI")
+    print(f"📦 Configuration Version: {config_mgr.get_version()}")
+    print("🚩 Feature Flags:")
+    for flag in ["persistent_sessions", "structured_logging", "metrics", "auto_push", "chaos_testing", "backup"]:
+        status = "ENABLED" if config_mgr.get_feature_flag(flag) else "DISABLED"
+        print(f"   - {flag}: {status}")
 
     # Get active projects from config
     active_projects = {
@@ -80,6 +97,7 @@ def main():
         print("📁 Task source: Local filesystem")
 
     checkpoint_manager = CheckpointManager(db_path="state/task_checkpoints.db")
+
     worker_id = "worker-main"
     worker_mode = config.get("company", {}).get("worker_mode", "scripted")
 
@@ -178,6 +196,9 @@ def main():
             if task.project not in active_projects:
                 continue
             if task_source.claim_task(task.task_id, worker_id):
+                # Clear any stale checkpoint from a previous run of this task.
+                # Only mid-flight tasks (already delegated) should resume from checkpoint.
+                checkpoint_manager.delete_checkpoint(task.task_id)
                 claimed_tasks.append(task)
                 mapped_agent_tasks.append(TaskParser.to_agent_format(task))
 
@@ -275,10 +296,52 @@ def main():
                                 summary_text = receipt_data.get("summary") or ""
                                 task_type = original_agent_task.get("task_type") if original_agent_task else "code"
                                 if task_type == "feature":
+                                    print(f"🚀 Publishing verified changes to Git for task {task_id}...")
                                     try:
-                                        summary_text += ResultVerifier.generate_feature_proofs(workspace_info.get("workspace"))
-                                    except Exception as e:
-                                        print(f"⚠️ Failed to generate feature proofs: {str(e)}")
+                                        from control.project_runtime import ProjectRuntimeManager
+                                        runtime = ProjectRuntimeManager()
+                                        git_res = runtime.git.publish_feature_branch(workspace_info.get("workspace"), task_id)
+                                        if git_res["success"]:
+                                            summary_text += f"\n\n### 🛡️ VERIFIED FEATURE PROOF (V3.1)\n"
+                                            summary_text += f"- **Current Branch**: `{git_res['branch']}`\n"
+                                            summary_text += f"- **Commit Hash**: `{git_res['commit_sha']}`\n"
+                                            summary_text += f"- **GitHub URL**: [{git_res['github_url']}]({git_res['github_url']})\n"
+                                            
+                                            # Update the current_branch and last_commit in session table
+                                            runtime.sessions.save_session(
+                                                project_id=project,
+                                                conversation_id=conv_id,
+                                                current_branch=git_res['branch'],
+                                                last_commit=git_res['commit_sha']
+                                            )
+                                            
+                                            print("\n==================================================")
+                                            print("GIT LIFECYCLE COMPLETED SUCCESSFULLY")
+                                            print("==================================================")
+                                            print(f"checkout (branch: {git_res['branch']})")
+                                            print("↓")
+                                            print(f"commit (hash: {git_res['commit_sha']})")
+                                            print("↓")
+                                            print("verify (verification checks passed)")
+                                            print("↓")
+                                            print(f"push (origin {git_res['branch']})")
+                                            print("↓")
+                                            print(f"GitHub URL: {git_res['github_url']}")
+                                            print("==================================================\n")
+                                            
+                                            try:
+                                                summary_text += ResultVerifier.generate_feature_proofs(workspace_info.get("workspace"))
+                                            except Exception as e:
+                                                print(f"⚠️ Failed to generate feature proofs: {str(e)}")
+                                        else:
+                                            print(f"❌ Git publish failed for task {task_id}: {git_res['error']}")
+                                            result["status"] = "BLOCKED"
+                                            summary_text = f"Git publish failed: {git_res['error']}"
+                                    except Exception as git_err:
+                                        print(f"❌ Git publish exception: {str(git_err)}")
+                                        result["status"] = "BLOCKED"
+                                        summary_text = f"Git publish exception: {str(git_err)}"
+                                        
                                 result["summary"] = summary_text
                                 result["validation_results"] = verify_details.get("validation_results", [])
                                 checkpoint_manager.delete_checkpoint(task_id)
@@ -304,6 +367,14 @@ def main():
                         else:
                             result["status"] = "FAILED"
                             result["summary"] = f"Malformed Receipt Error: {err}"
+                            
+                    # Always release the lock for this project/worker on completion
+                    try:
+                        from control.project_runtime import ProjectRuntimeManager
+                        runtime = ProjectRuntimeManager()
+                        runtime.sessions.release_lock(project, worker_id)
+                    except Exception as lock_err:
+                        print(f"⚠️ Failed to release lock for {project}: {str(lock_err)}")
                             
                 final_results.append(result)
 
