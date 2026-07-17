@@ -22,6 +22,9 @@ from control.checkpoint_manager import CheckpointManager
 from control.task_parser import TaskParser
 from control.receipt_monitor import ReceiptMonitor
 from control.result_verifier import ResultVerifier
+from control.structured_logger import logger
+from control import error_codes
+import uuid
 
 
 def load_config():
@@ -38,20 +41,20 @@ def main():
     config_mgr = ConfigManager()
     is_valid, errors = config_mgr.validate_startup()
     if not is_valid:
-        print("\n❌ STARTUP CONFIGURATION VALIDATION FAILED:")
         for err in errors:
-            print(f"   - {err}")
+            parts = err.split(":", 1)
+            err_code = parts[0].strip()
+            msg = parts[1].strip() if len(parts) > 1 else err
+            logger.critical(f"Startup config validation failed: {msg}", error_code=err_code, step="STARTUP")
         sys.exit(1)
 
     config = config_mgr.projects_config
 
-    print("\n🤖 ASHWANI AGENT COMPANY")
-    print("👑 BOSS: ASHWANI")
-    print(f"📦 Configuration Version: {config_mgr.get_version()}")
-    print("🚩 Feature Flags:")
+    logger.info("ASHWANI AGENT COMPANY - Worker Booted", step="STARTUP")
+    logger.info(f"Configuration Version: {config_mgr.get_version()}", step="STARTUP")
     for flag in ["persistent_sessions", "structured_logging", "metrics", "auto_push", "chaos_testing", "backup"]:
         status = "ENABLED" if config_mgr.get_feature_flag(flag) else "DISABLED"
-        print(f"   - {flag}: {status}")
+        logger.info(f"Feature Flag - {flag}: {status}", step="STARTUP")
 
     # Get active projects from config
     active_projects = {
@@ -88,17 +91,17 @@ def main():
                     supabase_key=_sb["supabase_key"],
                 )
                 use_supabase = True
-                print("☁️  Task source: Supabase")
+                logger.info("Task source initialized: Supabase", step="STARTUP")
         except Exception as _e:
-            print(f"⚠️  Supabase config load failed: {_e} — falling back to local")
+            logger.warning(f"Supabase config load failed: {_e} — falling back to local", error_code=error_codes.SUPABASE_001, step="STARTUP")
 
     if not use_supabase:
         task_source = LocalTaskSource(base_dir="tasks")
-        print("📁 Task source: Local filesystem")
+        logger.info("Task source initialized: Local filesystem", step="STARTUP")
 
     checkpoint_manager = CheckpointManager(db_path="state/task_checkpoints.db")
 
-    worker_id = "worker-main"
+    worker_id = logger.worker_id
     worker_mode = config.get("company", {}).get("worker_mode", "scripted")
 
     # Polling config
@@ -110,13 +113,14 @@ def main():
 
     def handle_shutdown(signum, frame):
         nonlocal shutdown
-        print("\n👋 Shutdown signal received. Gracefully exiting loop after current cycle...")
+        logger.info("Shutdown signal received. Gracefully exiting loop after current cycle...", step="SHUTDOWN")
         shutdown = True
 
     signal.signal(signal.SIGINT, handle_shutdown)
     signal.signal(signal.SIGTERM, handle_shutdown)
 
     last_worker_heartbeat = 0.0
+    trace_ids = {}
 
     while not shutdown:
         # Update worker heartbeat every 15 seconds
@@ -126,23 +130,23 @@ def main():
                 try:
                     task_source.update_worker_heartbeat(worker_id)
                     last_worker_heartbeat = now_time
-                except Exception:
-                    pass
+                except Exception as _e:
+                    logger.warning(f"Supabase worker heartbeat update failed: {_e}", error_code=error_codes.SUPABASE_003, step="HEARTBEAT")
 
         # 1. Stale task recovery
         if use_supabase:
             try:
                 recovered = task_source.recover_stale_tasks()
                 if recovered > 0:
-                    print(f"♻️  Recovered {recovered} stale task(s) back to inbox.")
+                    logger.info(f"Recovered {recovered} stale task(s) back to inbox.", step="RECOVERY")
             except Exception as e:
-                print(f"⚠️  Stale task recovery failed: {e}")
+                logger.error(f"Stale task recovery failed: {e}", error_code=error_codes.SUPABASE_002, step="RECOVERY")
 
         # 2. Fetch pending tasks from inbox
         try:
             pending_tasks = task_source.fetch_pending_tasks()
         except Exception as e:
-            print(f"⚠️  Failed to fetch pending tasks: {e}")
+            logger.error(f"Failed to fetch pending tasks: {e}", error_code=error_codes.SUPABASE_002, step="FETCH")
             pending_tasks = []
 
         # Generate default tasks only for local filesystem when empty
@@ -155,7 +159,7 @@ def main():
                         break
 
             if not has_active_working:
-                print("Inbox is empty. Generating default tasks in tasks/inbox/... ")
+                logger.info("Inbox is empty. Generating default tasks in tasks/inbox/...", step="FETCH")
                 default_oi = {
                     "task_id": "OI-001",
                     "project": "oi_labs",
@@ -196,8 +200,12 @@ def main():
             if task.project not in active_projects:
                 continue
             if task_source.claim_task(task.task_id, worker_id):
+                # Generate unique trace ID for this task execution
+                t_id = f"trace-{str(uuid.uuid4())[:8]}"
+                trace_ids[task.task_id] = t_id
+                logger.info(f"Claimed task: {task.task_id}", trace_id=t_id, task_id=task.task_id, project_id=task.project, step="CLAIMED")
+
                 # Clear any stale checkpoint from a previous run of this task.
-                # Only mid-flight tasks (already delegated) should resume from checkpoint.
                 checkpoint_manager.delete_checkpoint(task.task_id)
                 claimed_tasks.append(task)
                 mapped_agent_tasks.append(TaskParser.to_agent_format(task))
@@ -209,10 +217,13 @@ def main():
                 for task in active_tasks:
                     if task.project in active_projects:
                         if not any(t.task_id == task.task_id for t in claimed_tasks):
+                            t_id = trace_ids.get(task.task_id) or f"trace-{str(uuid.uuid4())[:8]}"
+                            trace_ids[task.task_id] = t_id
+                            logger.info(f"Resumed active task: {task.task_id}", trace_id=t_id, task_id=task.task_id, project_id=task.project, step="CLAIMED")
                             claimed_tasks.append(task)
                             mapped_agent_tasks.append(TaskParser.to_agent_format(task))
             except Exception as e:
-                print(f"⚠️  Failed to fetch active tasks: {e}")
+                logger.error(f"Failed to fetch active tasks: {e}", error_code=error_codes.SUPABASE_002, step="FETCH")
         else:
             if os.path.exists(task_source.working_dir):
                 for file in os.listdir(task_source.working_dir):
@@ -306,39 +317,27 @@ def main():
                                             summary_text += f"- **Current Branch**: `{git_res['branch']}`\n"
                                             summary_text += f"- **Commit Hash**: `{git_res['commit_sha']}`\n"
                                             summary_text += f"- **GitHub URL**: [{git_res['github_url']}]({git_res['github_url']})\n"
-                                            
-                                            # Update the current_branch and last_commit in session table
-                                            runtime.sessions.save_session(
+                                            logger.info(
+                                                f"Git lifecycle completed successfully: branch={git_res['branch']}, commit={git_res['commit_sha']}, url={git_res['github_url']}",
+                                                trace_id=trace_ids.get(task_id),
+                                                task_id=task_id,
                                                 project_id=project,
                                                 conversation_id=conv_id,
-                                                current_branch=git_res['branch'],
-                                                last_commit=git_res['commit_sha']
+                                                branch=git_res['branch'],
+                                                step="PUSHING",
+                                                status="DONE"
                                             )
-                                            
-                                            print("\n==================================================")
-                                            print("GIT LIFECYCLE COMPLETED SUCCESSFULLY")
-                                            print("==================================================")
-                                            print(f"checkout (branch: {git_res['branch']})")
-                                            print("↓")
-                                            print(f"commit (hash: {git_res['commit_sha']})")
-                                            print("↓")
-                                            print("verify (verification checks passed)")
-                                            print("↓")
-                                            print(f"push (origin {git_res['branch']})")
-                                            print("↓")
-                                            print(f"GitHub URL: {git_res['github_url']}")
-                                            print("==================================================\n")
                                             
                                             try:
                                                 summary_text += ResultVerifier.generate_feature_proofs(workspace_info.get("workspace"))
                                             except Exception as e:
-                                                print(f"⚠️ Failed to generate feature proofs: {str(e)}")
+                                                logger.warning(f"Failed to generate feature proofs: {str(e)}", trace_id=trace_ids.get(task_id), task_id=task_id, project_id=project, step="VERIFYING")
                                         else:
-                                            print(f"❌ Git publish failed for task {task_id}: {git_res['error']}")
+                                            logger.error(f"Git publish failed for task {task_id}: {git_res['error']}", error_code=error_codes.GIT_004, trace_id=trace_ids.get(task_id), task_id=task_id, project_id=project, step="PUSHING")
                                             result["status"] = "BLOCKED"
                                             summary_text = f"Git publish failed: {git_res['error']}"
                                     except Exception as git_err:
-                                        print(f"❌ Git publish exception: {str(git_err)}")
+                                        logger.error(f"Git publish exception: {str(git_err)}", error_code=error_codes.GIT_004, trace_id=trace_ids.get(task_id), task_id=task_id, project_id=project, step="PUSHING")
                                         result["status"] = "BLOCKED"
                                         summary_text = f"Git publish exception: {str(git_err)}"
                                         
@@ -350,7 +349,7 @@ def main():
                                 except Exception:
                                     pass
                             else:
-                                print(f"❌ Independent verification failed: {err_msg}")
+                                logger.error(f"Independent verification failed: {err_msg}", error_code=error_codes.VERIFIER_002, trace_id=trace_ids.get(task_id), task_id=task_id, project_id=project, step="VERIFYING")
                                 result["status"] = "BLOCKED"
                                 result["summary"] = f"Independent Verification Failed: {err_msg}"
                         elif receipt_status == "BLOCKED":
@@ -374,11 +373,11 @@ def main():
                         runtime = ProjectRuntimeManager()
                         runtime.sessions.release_lock(project, worker_id)
                     except Exception as lock_err:
-                        print(f"⚠️ Failed to release lock for {project}: {str(lock_err)}")
+                        logger.warning(f"Failed to release lock for {project}: {str(lock_err)}", error_code=error_codes.SESSION_002, trace_id=trace_ids.get(task_id), task_id=task_id, project_id=project, step="CLEANUP")
                             
                 final_results.append(result)
 
-            print("\n😎 DONE BOSS REPORT\n")
+            logger.info("Dispatching cycle completed - generating final status report", step="DISPATCH")
 
             for result in final_results:
                 status = result["status"]
@@ -401,28 +400,50 @@ def main():
                 else:
                     validation_info = "None"
 
-                print(f"{project} → {status}")
+                t_id = trace_ids.get(task_id)
                 if status == "DONE":
-                    print(f"Summary: {summary}")
-                    print(f"Actions: {actions_count}")
-                    print(f"Files changed: {files_changed_count}")
-                    print(f"Validation: {validation_info}\n")
+                    logger.info(
+                        f"Task completed successfully: {project} -> DONE. Summary: {summary} | Actions: {actions_count} | Files changed: {files_changed_count} | Validation: {validation_info}",
+                        trace_id=t_id,
+                        task_id=task_id,
+                        project_id=project,
+                        step="DISPATCH",
+                        status="DONE"
+                    )
                 elif status == "DELEGATED":
-                    conv_id = result.get("conversation_id", "Unknown")
-                    print(f"Conversation ID: {conv_id}")
-                    print(f"Summary: {summary}\n")
+                    logger.info(
+                        f"Task delegated to runtime: {project} -> DELEGATED. Summary: {summary}",
+                        trace_id=t_id,
+                        task_id=task_id,
+                        project_id=project,
+                        step="DISPATCH",
+                        status="DELEGATED"
+                    )
                 elif status == "BLOCKED":
-                    reason = result.get("reason") or summary or "Unknown reason"
-                    print(f"Reason: {reason}\n")
+                    logger.warning(
+                        f"Task blocked during run: {project} -> BLOCKED. Reason: {summary}",
+                        error_code=error_codes.VERIFIER_002,
+                        trace_id=t_id,
+                        task_id=task_id,
+                        project_id=project,
+                        step="DISPATCH",
+                        status="BLOCKED"
+                    )
                 elif status == "FAILED":
-                    error = result.get("error") or summary or "Unknown error"
-                    print(f"Error: {error}\n")
+                    logger.error(
+                        f"Task failed during execution: {project} -> FAILED. Error: {summary}",
+                        error_code=error_codes.WORKER_002,
+                        trace_id=t_id,
+                        task_id=task_id,
+                        project_id=project,
+                        step="DISPATCH",
+                        status="FAILED"
+                    )
 
         else:
-            # Idle, show heartbeat dot
+            # Idle, show heartbeat debug log
             if not run_once:
-                sys.stdout.write(".")
-                sys.stdout.flush()
+                logger.debug("Worker idle - polling for tasks", step="POLL")
 
         if run_once:
             break

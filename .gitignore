@@ -60,3 +60,4 @@ workspaces/
 logs/
 *.log
 start_worker_invisibly.vbs
+state/worker_id.txt
