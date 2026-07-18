@@ -319,7 +319,7 @@ class TestCompletionGate(unittest.TestCase):
     def test_feature_receipt_passes_with_branch_and_file_change(self):
         import subprocess
         # 1. Create branch containing task ID
-        subprocess.run(["git", "checkout", "-b", "feature/task-T-001"], cwd=self.workspace_dir, capture_output=True)
+        subprocess.run(["git", "checkout", "-b", "task-T-001"], cwd=self.workspace_dir, capture_output=True)
         
         # 2. Create a dummy file and commit it (so it shows in git status / diff)
         file_path = os.path.join(self.workspace_dir, "feature.py")
@@ -344,7 +344,7 @@ class TestCompletionGate(unittest.TestCase):
         
         verified, err, _ = ResultVerifier.verify_result(task, self.workspace_info, receipt)
         self.assertTrue(verified, f"Feature verification failed: {err}")
-
+ 
     def test_feature_receipt_fails_without_branch(self):
         import subprocess
         # 1. Create feature.py and commit to main (not a task branch containing T-002)
@@ -369,12 +369,12 @@ class TestCompletionGate(unittest.TestCase):
         
         verified, err, _ = ResultVerifier.verify_result(task, self.workspace_info, receipt)
         self.assertFalse(verified)
-        self.assertIn("No git branch found containing task ID", err)
-
+        self.assertIn("No git branch found with exact name", err)
+ 
     def test_feature_receipt_fails_without_file_change(self):
         import subprocess
         # Create branch containing task ID, but no files in files_changed
-        subprocess.run(["git", "checkout", "-b", "feature/task-T-003"], cwd=self.workspace_dir, capture_output=True)
+        subprocess.run(["git", "checkout", "-b", "task-T-003"], cwd=self.workspace_dir, capture_output=True)
         
         task = {
             "id": "T-003",
@@ -391,7 +391,7 @@ class TestCompletionGate(unittest.TestCase):
         verified, err, _ = ResultVerifier.verify_result(task, self.workspace_info, receipt)
         self.assertFalse(verified)
         self.assertIn("requires at least one files_changed entry", err)
-
-
+ 
+ 
 if __name__ == "__main__":
     unittest.main()

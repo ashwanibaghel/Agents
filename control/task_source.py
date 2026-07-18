@@ -190,6 +190,15 @@ class LocalTaskSource(TaskSource):
                 data["status"] = status.lower()
                 if evidence:
                     data["evidence"] = evidence
+                    if "artifacts" in evidence:
+                        data["artifacts"] = [{
+                            "name": art["name"],
+                            "path": art["path"],
+                            "type": art["type"],
+                            "size": art["size"],
+                            "summary": art["summary"],
+                            "content": art["content"]
+                        } for art in evidence["artifacts"]]
                     
                 with open(src_path, "w", encoding="utf-8") as f:
                     yaml.dump(data, f)

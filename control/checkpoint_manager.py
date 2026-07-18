@@ -25,6 +25,100 @@ class CheckpointManager:
                     checkpoint_data TEXT
                 )
             """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_sessions (
+                    project_id TEXT PRIMARY KEY,
+                    conversation_id TEXT,
+                    workspace_path TEXT,
+                    repository_url TEXT,
+                    default_branch TEXT,
+                    current_branch TEXT,
+                    last_commit TEXT,
+                    last_activity TEXT,
+                    status TEXT,
+                    locked_by TEXT,
+                    locked_at TEXT,
+                    created_at TEXT,
+                    updated_at TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS project_memories (
+                    project_id TEXT PRIMARY KEY,
+                    architecture TEXT,
+                    pending_todos TEXT,
+                    known_bugs TEXT,
+                    recent_decisions TEXT,
+                    coding_style TEXT,
+                    framework TEXT,
+                    backend_notes TEXT,
+                    oracle_notes TEXT,
+                    design_rules TEXT,
+                    owner_instructions TEXT,
+                    updated_at TEXT
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS task_artifacts (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    path TEXT NOT NULL,
+                    type TEXT NOT NULL,
+                    size INTEGER NOT NULL,
+                    summary TEXT,
+                    content TEXT NOT NULL,
+                    indexing_status TEXT DEFAULT 'PENDING',
+                    indexing_error TEXT,
+                    indexed_at TEXT,
+                    retry_count INTEGER DEFAULT 0,
+                    last_retry_at TEXT,
+                    next_retry_at TEXT,
+                    claimed_by TEXT,
+                    claimed_at TEXT,
+                    lease_expiration TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(task_id, name)
+                )
+            """)
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS task_knowledge (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    chunk_text TEXT NOT NULL,
+                    embedding TEXT NOT NULL,
+                    promoted_level TEXT DEFAULT 'TASK',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+            conn.commit()
+            
+            # Programmatically migrate task_artifacts and task_knowledge if missing
+            cursor = conn.cursor()
+            cursor.execute("PRAGMA table_info(task_artifacts)")
+            existing_art_cols = [col[1] for col in cursor.fetchall()]
+            art_cols_to_add = [
+                ("indexing_status", "TEXT DEFAULT 'PENDING'"),
+                ("indexing_error", "TEXT"),
+                ("indexed_at", "TEXT"),
+                ("retry_count", "INTEGER DEFAULT 0"),
+                ("last_retry_at", "TEXT"),
+                ("next_retry_at", "TEXT"),
+                ("claimed_by", "TEXT"),
+                ("claimed_at", "TEXT"),
+                ("lease_expiration", "TEXT")
+            ]
+            for col_name, col_type in art_cols_to_add:
+                if col_name not in existing_art_cols:
+                    conn.execute(f"ALTER TABLE task_artifacts ADD COLUMN {col_name} {col_type}")
+            
+            cursor.execute("PRAGMA table_info(task_knowledge)")
+            existing_kn_cols = [col[1] for col in cursor.fetchall()]
+            if "promoted_level" not in existing_kn_cols:
+                conn.execute("ALTER TABLE task_knowledge ADD COLUMN promoted_level TEXT DEFAULT 'TASK'")
             conn.commit()
             
             # Programmatically migrate/add columns if they are missing
@@ -44,6 +138,18 @@ class CheckpointManager:
             for col_name, col_type in columns_to_add:
                 if col_name not in existing_columns:
                     conn.execute(f"ALTER TABLE checkpoints ADD COLUMN {col_name} {col_type}")
+            conn.commit()
+            
+            cursor.execute("PRAGMA table_info(project_sessions)")
+            existing_session_cols = [col[1] for col in cursor.fetchall()]
+            session_cols_to_add = [
+                ("retry_count", "INTEGER DEFAULT 0"),
+                ("last_error", "TEXT"),
+                ("next_retry_at", "TEXT")
+            ]
+            for col_name, col_type in session_cols_to_add:
+                if col_name not in existing_session_cols:
+                    conn.execute(f"ALTER TABLE project_sessions ADD COLUMN {col_name} {col_type}")
             conn.commit()
             
     def save_checkpoint(self, task_id, project, status, worker_id, iteration, observations, actions, checkpoint_data=None):

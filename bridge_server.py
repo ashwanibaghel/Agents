@@ -11,6 +11,16 @@ Security:
 """
 
 import os
+import socket
+
+# Programmatically resolve unresponsive local DNS for Supabase host (V3.2.1 DNS patch)
+_original_getaddrinfo = socket.getaddrinfo
+def _custom_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host == "xrimbjoxmwqxryvxdojz.supabase.co":
+        return _original_getaddrinfo("104.18.38.10", port, family, type, proto, flags)
+    return _original_getaddrinfo(host, port, family, type, proto, flags)
+socket.getaddrinfo = _custom_getaddrinfo
+
 import uuid
 import datetime
 import json
@@ -97,6 +107,66 @@ class TaskStatusResponse(BaseModel):
     updated_at: Optional[str]
     summary: Optional[str]
     error_message: Optional[str]
+    artifact_list: Optional[List[str]] = Field(default_factory=list)
+
+
+# ── Artifact & Semantic Search models ──────────────────────────────────────────
+
+class ArtifactMetadataResponse(BaseModel):
+    name: str
+    path: str
+    type: str
+    size: int
+    summary: Optional[str] = None
+
+class ArtifactContentResponse(BaseModel):
+    name: str
+    content: str
+
+class KnowledgeSearchRequest(BaseModel):
+    query: str
+    task_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+class KnowledgeSearchItem(BaseModel):
+    name: str
+    chunk_text: str
+    similarity: float
+
+class KnowledgeSearchResponse(BaseModel):
+    matches: List[KnowledgeSearchItem]
+
+
+# ── Math & Embedding Helpers ───────────────────────────────────────────────────
+
+import math
+
+def dot_product(v1, v2):
+    return sum(x * y for x, y in zip(v1, v2))
+
+def magnitude(v):
+    return math.sqrt(sum(x * x for x in v))
+
+def cosine_similarity(v1, v2):
+    mag1 = magnitude(v1)
+    mag2 = magnitude(v2)
+    if mag1 == 0.0 or mag2 == 0.0:
+        return 0.0
+    return dot_product(v1, v2) / (mag1 * mag2)
+
+def generate_gemini_embedding(text: str, api_key: str) -> list:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={api_key}"
+    payload = {
+        "model": "models/text-embedding-004",
+        "content": {
+            "parts": [{"text": text}]
+        }
+    }
+    r = requests.post(url, json=payload, timeout=10.0)
+    if r.status_code == 200:
+        return r.json()["embedding"]["values"]
+    else:
+        raise Exception(f"Gemini API returned code {r.status_code}: {r.text}")
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -179,6 +249,7 @@ def get_task_status(task_id: str):
         updated_at=row.get("updated_at"),
         summary=row.get("summary"),
         error_message=row.get("error_message"),
+        artifact_list=row.get("evidence_paths") or []
     )
 
 
@@ -203,6 +274,7 @@ def get_boss_report():
             "updated_at": row.get("updated_at"),
             "summary": row.get("summary"),
             "error_message": row.get("error_message"),
+            "artifact_list": row.get("evidence_paths") or []
         })
 
     done = len(by_status.get("done", []))
@@ -224,6 +296,151 @@ def get_boss_report():
         },
         "tasks_by_status": by_status,
     }
+
+
+@app.get("/tasks/{task_id}/artifacts", response_model=List[ArtifactMetadataResponse], dependencies=[Depends(verify_token)])
+def get_task_artifacts(task_id: str):
+    """
+    Retrieve all artifacts (metadata only) associated with a task.
+    """
+    if not task_id.replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="Invalid task_id format")
+    rows = _sb_get(f"task_artifacts?task_id=eq.{task_id}&select=name,path,type,size,summary")
+    return [
+        ArtifactMetadataResponse(
+            name=r["name"],
+            path=r["path"],
+            type=r["type"],
+            size=r["size"],
+            summary=r.get("summary")
+        )
+        for r in rows
+    ]
+
+@app.get("/tasks/{task_id}/artifacts/{artifact_name}", response_model=ArtifactContentResponse, dependencies=[Depends(verify_token)])
+def get_task_artifact_content(task_id: str, artifact_name: str):
+    """
+    Retrieve the complete text/content of a specific task artifact.
+    """
+    if not task_id.replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="Invalid task_id format")
+    rows = _sb_get(f"task_artifacts?task_id=eq.{task_id}&name=eq.{artifact_name}&select=name,content")
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Artifact '{artifact_name}' for task {task_id} not found")
+    return ArtifactContentResponse(
+        name=rows[0]["name"],
+        content=rows[0]["content"]
+    )
+
+@app.post("/knowledge/search", response_model=KnowledgeSearchResponse, dependencies=[Depends(verify_token)])
+def search_knowledge(req: KnowledgeSearchRequest):
+    """
+    Perform semantic vector/similarity search across all task knowledge chunks.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured on server")
+    try:
+        query_emb = generate_gemini_embedding(req.query, api_key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate query embedding: {str(e)}")
+        
+    path = "task_knowledge?select=name,chunk_text,embedding"
+    if req.task_id:
+        path += f"&task_id=eq.{req.task_id}"
+    elif req.project_id:
+        tasks = _sb_get(f"tasks?project=eq.{req.project_id}&select=task_id")
+        task_ids = [t["task_id"] for t in tasks]
+        if not task_ids:
+            return KnowledgeSearchResponse(matches=[])
+        ids_str = ",".join(task_ids)
+        path += f"&task_id=in.({ids_str})"
+        
+    rows = _sb_get(path)
+    
+    matches = []
+    for r in rows:
+        emb = r.get("embedding")
+        if isinstance(emb, str):
+            try:
+                emb = json.loads(emb)
+            except Exception:
+                continue
+        if not isinstance(emb, list) or len(emb) != 768:
+            continue
+            
+        sim = cosine_similarity(query_emb, emb)
+        matches.append(
+            KnowledgeSearchItem(
+                name=r["name"],
+                chunk_text=r["chunk_text"],
+                similarity=float(sim)
+            )
+        )
+        
+    matches.sort(key=lambda x: x.similarity, reverse=True)
+    return KnowledgeSearchResponse(matches=matches[:5])
+
+
+# ── Context Builder Endpoint ───────────────────────────────────────────────────
+
+class TaskContextResponse(BaseModel):
+    task_id: str
+    context: str
+
+@app.get("/tasks/{task_id}/context", response_model=TaskContextResponse, dependencies=[Depends(verify_token)])
+def get_task_context(task_id: str):
+    """
+    Build a full GPT-ready engineering context prompt for a task.
+    Aggregates task metadata, artifact summaries, and knowledge chunks into
+    a single rich context block the Manager can embed in system prompts.
+    """
+    if not task_id.replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="Invalid task_id format")
+    try:
+        from control.context_builder import ContextBuilder
+        builder = ContextBuilder()
+        context_text = builder.build_task_context(task_id)
+        return TaskContextResponse(task_id=task_id, context=context_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build task context: {str(e)}")
+
+
+# ── Indexer Queue Endpoint ─────────────────────────────────────────────────────
+
+class IndexerQueueItem(BaseModel):
+    task_id: str
+    name: str
+    indexing_status: str
+    retry_count: Optional[int] = 0
+    indexing_error: Optional[str] = None
+
+class IndexerQueueResponse(BaseModel):
+    total_pending: int
+    items: List[IndexerQueueItem]
+
+@app.get("/indexer/queue", response_model=IndexerQueueResponse, dependencies=[Depends(verify_token)])
+def get_indexer_queue():
+    """
+    Return all artifacts currently in a non-INDEXED state (pending, failed, retrying).
+    Used for operational monitoring of the async KnowledgeIndexer pipeline.
+    """
+    rows = _sb_get(
+        "task_artifacts?indexing_status=neq.INDEXED"
+        "&select=task_id,name,indexing_status,retry_count,indexing_error"
+        "&order=updated_at.desc&limit=100"
+    )
+    items = [
+        IndexerQueueItem(
+            task_id=r["task_id"],
+            name=r["name"],
+            indexing_status=r["indexing_status"],
+            retry_count=r.get("retry_count", 0),
+            indexing_error=r.get("indexing_error")
+        )
+        for r in rows
+    ]
+    return IndexerQueueResponse(total_pending=len(items), items=items)
 
 
 from fastapi.responses import HTMLResponse
@@ -787,6 +1004,156 @@ def get_dashboard_ui():
         </div>
     </div>
 
+    <div class="latest-completed-section" style="margin-bottom: 2rem;">
+        <h2>🔄 Persistent Runtime Sessions (V3.1)</h2>
+        <table class="completed-table">
+            <thead>
+                <tr>
+                    <th>Project</th>
+                    <th>Conversation ID</th>
+                    <th>Status</th>
+                    <th>Workspace</th>
+                    <th>Branch</th>
+                    <th>Last Commit</th>
+                    <th>Memory Size</th>
+                    <th>Lock Owner</th>
+                    <th>Last Updated</th>
+                </tr>
+            </thead>
+            <tbody id="sessions-table-body">
+                <tr>
+                    <td colspan="9" style="text-align: center; color: var(--text-muted); font-style: italic;">No active sessions loaded</td>
+                </tr>
+            </tbody>
+        </table>
+    </div>
+
+    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 2rem; margin-bottom: 2rem;">
+        <!-- Health Section -->
+        <div class="latest-completed-section" style="margin-bottom: 0;">
+            <h2>❤️ System Component Health (V3.2)</h2>
+            <table class="completed-table">
+                <thead>
+                    <tr>
+                        <th>Component</th>
+                        <th>Health State</th>
+                        <th>Status</th>
+                        <th>Latency</th>
+                        <th>Last Check</th>
+                        <th>Retries</th>
+                    </tr>
+                </thead>
+                <tbody id="health-table-body">
+                    <tr>
+                        <td colspan="6" style="text-align: center; color: var(--text-muted); font-style: italic;">Loading health data...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+
+        <!-- Metrics Section -->
+        <div class="latest-completed-section" style="margin-bottom: 0;">
+            <h2>📈 Runtime Observability Metrics (V3.2)</h2>
+            <table class="completed-table">
+                <thead>
+                    <tr>
+                        <th>Metric</th>
+                        <th>Value</th>
+                    </tr>
+                </thead>
+                <tbody id="metrics-table-body">
+                    <tr>
+                        <td colspan="2" style="text-align: center; color: var(--text-muted); font-style: italic;">Loading metrics...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+        </div>
+
+        <!-- Operations Section (V3.2 Sprint 6) -->
+        <div class="latest-completed-section" id="ops-section">
+            <h2>⚙️ Operations Dashboard (V3.2)</h2>
+            <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1.25rem;margin-top:1rem;">
+
+                <!-- Worker Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">🤖 Worker</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody id="ops-worker-body">
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Status</td><td id="ops-w-status" style="text-align:right;font-weight:600;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Worker ID</td><td id="ops-w-id" style="text-align:right;font-family:monospace;font-size:0.78rem;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Uptime</td><td id="ops-w-uptime" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Startup Count</td><td id="ops-w-startups" style="text-align:right;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Queue Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">📋 Queue</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Pending</td><td id="ops-q-pending" style="text-align:right;font-weight:600;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Running</td><td id="ops-q-running" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Completed</td><td id="ops-q-done" style="text-align:right;color:#10b981;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Failed</td><td id="ops-q-failed" style="text-align:right;color:#ef4444;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Blocked</td><td id="ops-q-blocked" style="text-align:right;color:#f59e0b;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Sessions Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">💬 Sessions</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Active Sessions</td><td id="ops-s-active" style="text-align:right;font-weight:600;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Reused</td><td id="ops-s-reused" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Expiries</td><td id="ops-s-expired" style="text-align:right;color:#f59e0b;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Git Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">🔀 Git</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Git Success Rate</td><td id="ops-git-rate" style="text-align:right;font-weight:600;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Failures</td><td id="ops-git-fail" style="text-align:right;color:#ef4444;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Backup Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">💾 Backup</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Latest Backup</td><td id="ops-bk-id" style="text-align:right;font-family:monospace;font-size:0.76rem;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Backup Age</td><td id="ops-bk-age" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Total Backups</td><td id="ops-bk-count" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Backup Failures</td><td id="ops-bk-fail" style="text-align:right;color:#f59e0b;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+                <!-- Validator Panel -->
+                <div style="background:var(--card-bg);border:1px solid var(--card-border);border-radius:12px;padding:1.25rem;">
+                    <div style="font-size:0.7rem;text-transform:uppercase;letter-spacing:1px;color:var(--accent-primary);margin-bottom:0.75rem;font-weight:600;">✅ Validator</div>
+                    <table style="width:100%;font-size:0.85rem;border-collapse:collapse;">
+                        <tbody>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Readiness Score</td><td id="ops-vl-score" style="text-align:right;font-weight:600;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Status</td><td id="ops-vl-status" style="text-align:right;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Warnings</td><td id="ops-vl-warn" style="text-align:right;color:#f59e0b;">—</td></tr>
+                            <tr><td style="color:var(--text-muted);padding:3px 0;">Failures</td><td id="ops-vl-fail" style="text-align:right;color:#ef4444;">—</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+
+            </div>
+        </div>
+
     <div class="latest-completed-section">
         <h2>📊 Recent Finished Tasks</h2>
         <table class="completed-table">
@@ -1066,6 +1433,146 @@ def get_dashboard_ui():
                         `;
                     }).join('');
                 }
+
+                // Render Persistent Sessions Table
+                const sessionsTbody = document.getElementById('sessions-table-body');
+                const sessionsList = data.sessions || [];
+                if (sessionsList.length === 0) {
+                    sessionsTbody.innerHTML = `<tr><td colspan="9" style="text-align: center; color: var(--text-muted); font-style: italic;">No active sessions loaded</td></tr>`;
+                } else {
+                    sessionsTbody.innerHTML = sessionsList.map(s => {
+                        const statusClass = s.status.toLowerCase();
+                        const updatedTime = s.updated_at ? new Date(s.updated_at).toLocaleString() : 'N/A';
+                        const lockText = s.locked_by ? `<span style="color: #f59e0b; font-weight: 500;">🔒 ${s.locked_by}</span>` : '<span style="color: #10b981;">🔓 None</span>';
+                        return `
+                            <tr>
+                                <td><span class="project-badge ${s.project_id}">${s.project_id}</span></td>
+                                <td style="font-family: monospace; font-size: 0.85rem; color: #818cf8;">${s.conversation_id}</td>
+                                <td><span class="status-badge ${statusClass}">${s.status}</span></td>
+                                <td style="font-size: 0.8rem; font-family: monospace; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.workspace_path || 'N/A'}</td>
+                                <td style="font-family: monospace; color: #fb7185;">${s.current_branch || 'N/A'}</td>
+                                <td style="font-family: monospace; font-size: 0.8rem; max-width: 100px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${s.last_commit || 'N/A'}</td>
+                                <td style="text-align: center; font-weight: 600; color: #a78bfa;">${s.memory_size} fields</td>
+                                <td>${lockText}</td>
+                                <td>${updatedTime}</td>
+                            </tr>
+                        `;
+                    }).join('');
+                }
+                
+                // Render Component Health
+                const healthTbody = document.getElementById('health-table-body');
+                if (data.health && data.health.components) {
+                    const healthRows = [];
+                    for (const [name, c] of Object.entries(data.health.components)) {
+                        let stateClass = 'offline';
+                        if (c.health_state === 'HEALTHY') stateClass = 'online';
+                        else if (c.health_state === 'DEGRADED') stateClass = 'working';
+                        
+                        const lastCheckStr = c.last_check ? new Date(c.last_check).toLocaleTimeString() : 'N/A';
+                        healthRows.push(`
+                            <tr>
+                                <td style="font-weight: 600; color: #a78bfa;">${name}</td>
+                                <td><span class="status-badge ${stateClass}">${c.health_state}</span></td>
+                                <td style="font-size: 0.85rem; max-width: 200px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${c.status}</td>
+                                <td style="font-family: monospace;">${c.latency_ms}ms</td>
+                                <td>${lastCheckStr}</td>
+                                <td style="text-align: center;">${c.retry_count}</td>
+                            </tr>
+                        `);
+                    }
+                    healthTbody.innerHTML = healthRows.join('');
+                } else {
+                    healthTbody.innerHTML = `<tr><td colspan="6" style="text-align: center; color: var(--text-muted);">No health data available</td></tr>`;
+                }
+
+                // Render Metrics Table
+                const metricsTbody = document.getElementById('metrics-table-body');
+                if (data.metrics) {
+                    const m = data.metrics;
+                    const tm = m.task_metrics || {};
+                    const em = m.execution_metrics || {};
+                    const rm = m.reliability_metrics || {};
+                    const reuse = m.reuse_metrics || {};
+                    const succ = m.success_metrics || {};
+                    const wm = m.worker_metrics || {};
+                    
+                    const formatPct = (val) => (val * 100).toFixed(1) + '%';
+                    const formatDuration = (ms) => ms > 0 ? (ms / 1000).toFixed(2) + 's' : '0.00s';
+                    
+                    metricsTbody.innerHTML = `
+                        <tr><td><strong>Total Tasks Claimed</strong></td><td>${tm.total_tasks || 0}</td></tr>
+                        <tr><td><strong>Completed / Failed / Blocked</strong></td><td>
+                            <span class="status-badge online">${tm.completed_tasks || 0}</span> / 
+                            <span class="status-badge offline">${tm.failed_tasks || 0}</span> / 
+                            <span class="status-badge blocked">${tm.blocked_tasks || 0}</span>
+                        </td></tr>
+                        <tr><td><strong>Average Runtime</strong></td><td>${formatDuration(em.average_execution)}</td></tr>
+                        <tr><td><strong>Median Runtime (P50)</strong></td><td>${formatDuration(em.median_execution)}</td></tr>
+                        <tr><td><strong>P95 Runtime</strong></td><td>${formatDuration(em.P95_execution)}</td></tr>
+                        <tr><td><strong>Fastest / Slowest Runtime</strong></td><td>${formatDuration(em.fastest_task)} / ${formatDuration(em.slowest_task)}</td></tr>
+                        <tr><td><strong>Workspace Reuse %</strong></td><td>${formatPct(reuse.workspace_reuse_rate)}</td></tr>
+                        <tr><td><strong>Conversation Reuse %</strong></td><td>${formatPct(reuse.conversation_reuse_rate)}</td></tr>
+                        <tr><td><strong>Git Success %</strong></td><td>${formatPct(succ.git_success_rate)}</td></tr>
+                        <tr><td><strong>Verifier Success %</strong></td><td>${formatPct(succ.verifier_success_rate)}</td></tr>
+                        <tr><td><strong>Reliability Retries / Expiries</strong></td><td>
+                            Retries: ${rm.retry_count || 0} | Session Expiries: ${rm.session_expiry_count || 0} | Metrics Failures: ${rm.metrics_failures || 0}
+                        </td></tr>
+                        <tr><td><strong>Worker Uptime / Startup Count</strong></td><td>
+                            Uptime: ${wm.worker_uptime || 0}s | Startups: ${wm.startup_count || 0}
+                        </td></tr>
+                    `;
+                } else {
+                    metricsTbody.innerHTML = `<tr><td colspan="2" style="text-align: center; color: var(--text-muted);">No metrics data available</td></tr>`;
+                }
+                // Render Operations Section (V3.2 S6) — consumes data already fetched, no extra API calls
+                try {
+                    // Worker panel
+                    const wStatus = data.worker_status || 'OFFLINE';
+                    document.getElementById('ops-w-status').innerText = wStatus;
+                    document.getElementById('ops-w-status').style.color = wStatus === 'ONLINE' ? '#10b981' : '#ef4444';
+                    document.getElementById('ops-w-uptime').innerText = data.uptime ? formatDuration(data.uptime) : '—';
+                    const wm = (data.metrics && data.metrics.worker_metrics) ? data.metrics.worker_metrics : {};
+                    document.getElementById('ops-w-id').innerText = wm.worker_id || '—';
+                    document.getElementById('ops-w-startups').innerText = wm.startup_count || '—';
+
+                    // Queue panel
+                    document.getElementById('ops-q-pending').innerText = data.inbox || 0;
+                    document.getElementById('ops-q-running').innerText = data.working || 0;
+                    document.getElementById('ops-q-done').innerText = data.done || 0;
+                    document.getElementById('ops-q-failed').innerText = data.failed || 0;
+                    document.getElementById('ops-q-blocked').innerText = data.blocked || 0;
+
+                    // Sessions panel
+                    const sessions = data.sessions || [];
+                    const activeSessions = sessions.filter(s => s.status === 'ACTIVE').length;
+                    const rm = (data.metrics && data.metrics.reliability_metrics) ? data.metrics.reliability_metrics : {};
+                    const reuse = (data.metrics && data.metrics.reuse_metrics) ? data.metrics.reuse_metrics : {};
+                    document.getElementById('ops-s-active').innerText = activeSessions;
+                    document.getElementById('ops-s-reused').innerText = reuse.conversation_reuses !== undefined ? reuse.conversation_reuses : '—';
+                    document.getElementById('ops-s-expired').innerText = rm.session_expiry_count || 0;
+
+                    // Git panel
+                    const succ = (data.metrics && data.metrics.success_metrics) ? data.metrics.success_metrics : {};
+                    document.getElementById('ops-git-rate').innerText = succ.git_success_rate !== undefined ? (succ.git_success_rate * 100).toFixed(1) + '%' : '—';
+                    document.getElementById('ops-git-fail').innerText = rm.git_failures || 0;
+
+                    // Backup panel
+                    const bkm = (data.metrics && data.metrics.reliability_metrics) ? data.metrics.reliability_metrics : {};
+                    document.getElementById('ops-bk-id').innerText = bkm.latest_backup_id || 'None';
+                    document.getElementById('ops-bk-age').innerText = bkm.backup_age_seconds !== undefined ? (bkm.backup_age_seconds / 60).toFixed(0) + 'm ago' : '—';
+                    document.getElementById('ops-bk-count').innerText = bkm.backup_count !== undefined ? bkm.backup_count : '—';
+                    document.getElementById('ops-bk-fail').innerText = bkm.backup_failure_count || 0;
+
+                    // Validator panel — best-effort from metrics
+                    const vl = (data.metrics && data.metrics.validator_status) ? data.metrics.validator_status : {};
+                    document.getElementById('ops-vl-score').innerText = vl.score !== undefined ? (vl.score * 100).toFixed(1) + '%' : '—';
+                    document.getElementById('ops-vl-status').innerText = vl.status || '—';
+                    document.getElementById('ops-vl-warn').innerText = vl.warnings !== undefined ? vl.warnings : '—';
+                    document.getElementById('ops-vl-fail').innerText = vl.failures !== undefined ? vl.failures : '—';
+                } catch(opsErr) {
+                    console.warn('Ops section render error:', opsErr);
+                }
             } catch (err) {
                 console.error("Dashboard pull error:", err);
             }
@@ -1202,6 +1709,57 @@ def get_dashboard_data():
         completed_statuses = ["done", "blocked", "failed"]
         latest_completed = [t for t in tasks if (t.get("status", "").lower() in completed_statuses) and (t.get("project") != "system")][:5]
 
+        # 1.5 Fetch persistent project sessions
+        sessions = []
+        try:
+            db_path = "state/task_checkpoints.db"
+            if os.path.exists(db_path):
+                import sqlite3
+                with sqlite3.connect(db_path) as conn:
+                    conn.row_factory = sqlite3.Row
+                    cursor = conn.cursor()
+                    cursor.execute("""
+                        SELECT project_id, conversation_id, workspace_path, repository_url, 
+                               default_branch, current_branch, last_commit, last_activity, status, 
+                               locked_by, locked_at, updated_at
+                        FROM project_sessions
+                    """)
+                    for row in cursor.fetchall():
+                        mem_size = 0
+                        try:
+                            cursor2 = conn.cursor()
+                            cursor2.execute("SELECT architecture, pending_todos, known_bugs, recent_decisions, coding_style, framework, backend_notes, oracle_notes, design_rules, owner_instructions FROM project_memories WHERE project_id = ?", (row["project_id"],))
+                            mem_row = cursor2.fetchone()
+                            if mem_row:
+                                mem_size = sum(1 for val in mem_row if val and str(val).strip())
+                        except Exception:
+                            pass
+                            
+                        sessions.append({
+                            "project_id": row["project_id"],
+                            "conversation_id": row["conversation_id"],
+                            "workspace_path": row["workspace_path"],
+                            "repository_url": row["repository_url"],
+                            "default_branch": row["default_branch"],
+                            "current_branch": row["current_branch"],
+                            "last_commit": row["last_commit"],
+                            "last_activity": row["last_activity"],
+                            "status": row["status"],
+                            "locked_by": row["locked_by"],
+                            "locked_at": row["locked_at"],
+                            "memory_size": mem_size,
+                            "updated_at": row["updated_at"]
+                        })
+        except Exception as e:
+            print(f"⚠️ Failed to fetch project sessions: {e}")
+
+        from control.health_monitor import HealthMonitor
+        from control.metrics_manager import metrics_manager
+        
+        monitor = HealthMonitor()
+        health_data = monitor.get_system_health()
+        metrics_data = metrics_manager.get_metrics_report()
+
         return {
             "worker_status": worker_status,
             "heartbeat": heartbeat,
@@ -1213,6 +1771,9 @@ def get_dashboard_data():
             "failed": failed_count,
             "latest_completed": latest_completed,
             "uptime": uptime,
+            "sessions": sessions,
+            "health": health_data,
+            "metrics": metrics_data,
             "lists": {
                 "inbox": inbox_list[:10],
                 "working": working_list[:10],
@@ -1244,9 +1805,165 @@ def get_dashboard_data():
         }
 
 
+@app.get("/diagnostics", include_in_schema=True)
+def get_diagnostics():
+    """
+    Read-only system diagnostics snapshot.
+    Returns cached/available runtime information only.
+    Never touches Git (writes), creates sessions, runs validator, creates backups, or writes anything.
+    """
+    import sys
+    import platform
+    import datetime as _dt
+    from control.metrics_manager import metrics_manager
+
+    diag = {}
+
+    # 1. Worker identity + metrics summary (read cached metrics report)
+    try:
+        m = metrics_manager.get_metrics_report()
+        wm = m.get("worker_metrics", {})
+        diag["worker"] = {
+            "worker_id":      wm.get("worker_id", ""),
+            "startup_count":  wm.get("startup_count", 0),
+            "uptime_s":       wm.get("worker_uptime", 0),
+            "last_heartbeat": wm.get("last_heartbeat", None),
+        }
+        diag["metrics_summary"] = {
+            "total_tasks":           m.get("task_metrics", {}).get("total_tasks", 0),
+            "completed":             m.get("task_metrics", {}).get("completed_tasks", 0),
+            "failed":                m.get("task_metrics", {}).get("failed_tasks", 0),
+            "blocked":               m.get("task_metrics", {}).get("blocked_tasks", 0),
+            "git_success_rate":      m.get("success_metrics", {}).get("git_success_rate", 0),
+            "verifier_success_rate": m.get("success_metrics", {}).get("verifier_success_rate", 0),
+            "backup_failure_count":  m.get("reliability_metrics", {}).get("backup_failure_count", 0),
+        }
+    except Exception as e:
+        diag["worker"] = {"error": str(e)}
+        diag["metrics_summary"] = {}
+
+    # 2. Configuration (read-only file reads)
+    try:
+        from control.config_manager import ConfigManager
+        cm = ConfigManager()
+        diag["configuration"] = {
+            "version":         cm.get_version(),
+            "active_projects": list(cm.projects_config.get("projects", {}).keys()),
+        }
+        diag["feature_flags"] = {
+            flag: cm.get_feature_flag(flag)
+            for flag in ["persistent_sessions", "structured_logging", "metrics",
+                         "auto_push", "chaos_testing", "backup"]
+        }
+    except Exception as e:
+        diag["configuration"] = {"error": str(e)}
+        diag["feature_flags"] = {}
+
+    # 3. Environment summary (read-only)
+    diag["environment"] = {
+        "python_version": sys.version,
+        "platform":       platform.platform(),
+        "cwd":            os.getcwd(),
+        "timestamp":      _dt.datetime.utcnow().isoformat() + "Z",
+    }
+
+    # 4. Component versions
+    diag["component_versions"] = {
+        "bridge_server":        "3.2",
+        "structured_logger":    "3.2",
+        "audit_trail":          "3.2",
+        "metrics_manager":      "3.2",
+        "health_monitor":       "3.2",
+        "backup_manager":       "3.2",
+        "production_validator": "3.2",
+        "telemetry":            "3.2",
+    }
+
+    # 5. Recent audit events (read-only SQLite SELECT)
+    try:
+        from control.audit_trail import audit_trail
+        recent = audit_trail.get_recent(limit=10)
+        diag["recent_audit_events"] = recent
+    except Exception as e:
+        diag["recent_audit_events"] = {"error": str(e)}
+
+    # 6. Backup status (read-only directory scan + manifest reads)
+    try:
+        backup_dir = "state/backups"
+        backups = []
+        if os.path.exists(backup_dir):
+            for entry in sorted(os.listdir(backup_dir), reverse=True)[:5]:
+                manifest_path = os.path.join(backup_dir, entry, "manifest.json")
+                if os.path.exists(manifest_path):
+                    with open(manifest_path, "r", encoding="utf-8") as _f:
+                        manifest = json.load(_f)
+                    backups.append({
+                        "backup_id":  manifest.get("backup_id", entry),
+                        "created_at": manifest.get("created_at"),
+                        "label":      manifest.get("label"),
+                        "file_count": len(manifest.get("files", [])),
+                    })
+        diag["backup_status"] = {
+            "total_backups":  len(os.listdir(backup_dir)) if os.path.exists(backup_dir) else 0,
+            "recent_backups": backups,
+        }
+    except Exception as e:
+        diag["backup_status"] = {"error": str(e)}
+
+    # 7. Git status (read-only git commands — no writes)
+    try:
+        import subprocess
+        branch_res = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, timeout=3
+        )
+        commit_res = subprocess.run(
+            ["git", "log", "-1", "--format=%h %s"],
+            capture_output=True, text=True, timeout=3
+        )
+        diag["git_status"] = {
+            "current_branch": branch_res.stdout.strip() if branch_res.returncode == 0 else "unknown",
+            "last_commit":    commit_res.stdout.strip() if commit_res.returncode == 0 else "unknown",
+        }
+    except Exception as e:
+        diag["git_status"] = {"error": str(e)}
+
+    # 8. Validator cache (read cached result — never runs validator)
+    try:
+        validator_cache_path = "state/validator_cache.json"
+        if os.path.exists(validator_cache_path):
+            with open(validator_cache_path, "r", encoding="utf-8") as _f:
+                diag["validator_status"] = json.load(_f)
+        else:
+            diag["validator_status"] = {
+                "note": "No cached result. Run production_check.py to populate."
+            }
+    except Exception as e:
+        diag["validator_status"] = {"error": str(e)}
+
+    # 9. Configuration Precedence fields resolved by config_resolver
+    try:
+        from control.config_resolver import resolve_config
+        cfg = resolve_config()
+        diag.update(cfg)
+    except Exception as e:
+        diag["config_resolve_error"] = str(e)
+
+    return diag
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "ashwani-agent-company-bridge"}
+    from control.health_monitor import HealthMonitor
+    monitor = HealthMonitor()
+    return monitor.get_system_health()
+
+
+
+@app.get("/metrics")
+def metrics():
+    from control.metrics_manager import metrics_manager
+    return metrics_manager.get_metrics_report()
 
 
 @app.get("/openapi.json", include_in_schema=False)
@@ -1260,10 +1977,48 @@ def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
         
+    instructions = (
+        "Ashwani Agent Company Bridge API.\n\n"
+        "CRITICAL SYSTEM INSTRUCTIONS & INTENT ROUTING RULES:\n"
+        "You are the Manager Agent for Ashwani Agent Company. You coordinate and monitor autonomous developers (Antigravity workers).\n\n"
+        "PRIORITY HIERARCHY:\n"
+        "1. Internal Actions (get_task_status, get_boss_report, create_task, get_task_artifacts, get_task_artifact_content, search_knowledge) MUST always take priority over Web Search.\n"
+        "2. If an internal Action exists, Web Search MUST NEVER be used.\n"
+        "3. Worker state, task status, receipts, reports, project context, and engineering artifacts (e.g., RECON.md, AI_MANAGER_DOCS, TECHNICAL_DISCOVERY) are strictly internal. Do not search the public internet for them.\n"
+        "4. ONLY use Web Search when the user explicitly asks for public internet information.\n\n"
+        "INTENT ROUTER MAPPINGS:\n"
+        "- Queries about worker response, reply, task status, task progress, or whether a project finished:\n"
+        "  * \"Check the worker response.\"\n"
+        "  * \"Check worker reply\"\n"
+        "  * \"Did DKFFJ finish?\"\n"
+        "  * \"Did the worker finish?\"\n"
+        "  * \"What is the status of my task?\"\n"
+        "  -> Route to get_boss_report() or get_task_status(task_id). If task_id is unknown, FIRST call get_boss_report() to find it.\n\n"
+        "- Queries about reports, receipts, output, recent discoveries, or actions taken:\n"
+        "  * \"Show me the report.\"\n"
+        "  * \"Show report\"\n"
+        "  * \"latest worker output\"\n"
+        "  * \"What did the worker do?\"\n"
+        "  * \"what happened?\"\n"
+        "  * \"Latest OI Lens discovery.\"\n"
+        "  -> Route to get_boss_report() to get the status summary of all recent tasks.\n\n"
+        "- Queries about report contents, worker findings, project structure, or specific artifacts (e.g., RECON.md, AI_MANAGER_DOCS, TECHNICAL_DISCOVERY):\n"
+        "  * \"What did the worker discover?\"\n"
+        "  * \"Summarize RECON.md\"\n"
+        "  * \"Explain discovery\"\n"
+        "  * \"What architecture did the worker find?\"\n"
+        "  * \"Show me the documentation\"\n"
+        "  -> FIRST call get_task_status(task_id) or get_boss_report() to find the task_id.\n"
+        "  -> THEN call get_task_artifacts(task_id) to inspect the list of available artifacts.\n"
+        "  -> THEN call get_task_artifact_content(task_id, name) to read the full content of the target file.\n\n"
+        "- Queries seeking semantic answers from task files or project knowledge (e.g., \"Where is auth implemented?\", \"What DB does OI Lens use?\"):\n"
+        "  -> Call search_knowledge(query, task_id, project_id) to perform semantic search, then summarize based on returned chunks."
+    )
+
     openapi_schema = get_openapi(
         title="Ashwani Agent Company Bridge API",
         version="1.0.0",
-        description="ChatGPT Action Connector bridge for managing agent tasks.",
+        description=instructions,
         routes=app.routes,
         servers=[
             {
@@ -1282,12 +2037,23 @@ def custom_openapi():
                 route.operation_id = "get_task_status"
             elif route.path == "/report":
                 route.operation_id = "get_boss_report"
+            elif route.path == "/tasks/{task_id}/artifacts":
+                route.operation_id = "get_task_artifacts"
+            elif route.path == "/tasks/{task_id}/artifacts/{artifact_name}":
+                route.operation_id = "get_task_artifact_content"
+            elif route.path == "/knowledge/search":
+                route.operation_id = "search_knowledge"
+            elif route.path == "/tasks/{task_id}/context":
+                route.operation_id = "get_task_context"
+            elif route.path == "/indexer/queue":
+                route.operation_id = "get_indexer_queue"
+
                 
     # Regenerate schema with correct operationIds
     openapi_schema = get_openapi(
         title="Ashwani Agent Company Bridge API",
         version="1.0.0",
-        description="ChatGPT Action Connector bridge for managing agent tasks.",
+        description=instructions,
         routes=app.routes,
         servers=[
             {

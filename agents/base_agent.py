@@ -196,7 +196,7 @@ class BaseAgent:
             )
             return result
             
-        if task_type not in ["audit", "code", "feature"]:
+        if task_type not in ["audit", "code", "feature", "research"]:
             self.block_task(f"Invalid task_type: '{task_type}'.")
             result = self.create_task_result(
                 status="BLOCKED",
@@ -481,7 +481,7 @@ class BaseAgent:
         """Gatekeeper validating task completion criteria before allowing DONE status."""
         task_type = task.get("task_type")
         
-        if task_type == "audit":
+        if task_type in ["audit", "research"]:
             # 1. At least one repository inspection observation must exist
             inspection_actions = ["LIST_FILES", "READ_FILE", "SEARCH_CODE", "GET_GIT_STATUS", "RUN_COMMAND"]
             has_inspection = any(

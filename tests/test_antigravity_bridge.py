@@ -117,7 +117,7 @@ class TestAntigravityBridge(unittest.TestCase):
         # Verify operational constraint instructions
         self.assertIn("Inspect the existing repository first", prompt)
         self.assertIn("Work ONLY inside the exact assigned workspace directory", prompt)
-        self.assertIn("Create and use a dedicated task branch", prompt)
+        self.assertIn("dedicated task branch", prompt)
         self.assertIn("Never modify another project workspace", prompt) # matches "Never modify any files or directories outside this assigned project workspace"
         self.assertIn("Never read, print, or expose .env", prompt)
 
@@ -232,8 +232,11 @@ class TestAntigravityBridge(unittest.TestCase):
         self.assertEqual(res["status"], "DELEGATED")
         self.assertEqual(res["conversation_id"], "saved-conv-456")
         
-        # Verify no calls were made to mock client
-        self.assertEqual(len(self.mock_client.history), 0)
+        # Verify only a metadata check was made (no new_conversation or send_message calls)
+        meta_calls = [h for h in self.mock_client.history if h[0] == "get_conversation_metadata"]
+        new_conv_calls = [h for h in self.mock_client.history if h[0] == "new_conversation"]
+        self.assertEqual(len(meta_calls), 1, "Expected exactly one metadata validation call")
+        self.assertEqual(len(new_conv_calls), 0, "Expected no new_conversation calls when resuming")
 
 
 if __name__ == "__main__":

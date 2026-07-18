@@ -1,0 +1,79 @@
+{
+  "run_id": "SOAK-CB5879FB",
+  "duration_s": 120.2,
+  "timestamp": "2026-07-18T20:20:38.922604",
+  "metrics": {
+    "tasks_created": 241,
+    "tasks_indexed": 241,
+    "tasks_failed": 0,
+    "duplicate_chunks": 0,
+    "orphaned_leases": 0,
+    "deadlocks": 0,
+    "total_chunks": 482,
+    "errors": []
+  },
+  "throughput_per_min": 120.3,
+  "memory_growth_mb": 0.015,
+  "projections_24h": {
+    "tasks": 173267,
+    "chunks": 346534,
+    "mem_mb": 10.8
+  },
+  "all_pass": true,
+  "snapshots": [
+    {
+      "elapsed_s": 21.7,
+      "mem_mb": 0.012,
+      "tasks_created": 59,
+      "tasks_indexed": 59,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    },
+    {
+      "elapsed_s": 41.9,
+      "mem_mb": 0.014,
+      "tasks_created": 108,
+      "tasks_indexed": 108,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    },
+    {
+      "elapsed_s": 62.2,
+      "mem_mb": 0.017,
+      "tasks_created": 146,
+      "tasks_indexed": 146,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    },
+    {
+      "elapsed_s": 82.7,
+      "mem_mb": 0.02,
+      "tasks_created": 177,
+      "tasks_indexed": 177,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    },
+    {
+      "elapsed_s": 103.1,
+      "mem_mb": 0.024,
+      "tasks_created": 213,
+      "tasks_indexed": 213,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    },
+    {
+      "elapsed_s": 120.2,
+      "mem_mb": 0.027,
+      "tasks_created": 241,
+      "tasks_indexed": 241,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    }
+  ]
+}

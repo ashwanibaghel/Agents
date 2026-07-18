@@ -96,3 +96,52 @@
     );
 
     ALTER TABLE public.worker_status ENABLE ROW LEVEL SECURITY;
+
+
+    -- ══════════════════════════════════════════════════════════════════
+    -- Version 3.3 Upgrades: task_artifacts and task_knowledge
+    -- ══════════════════════════════════════════════════════════════════
+
+    -- 8. Create task_artifacts table
+    CREATE TABLE IF NOT EXISTS public.task_artifacts (
+        id                BIGSERIAL PRIMARY KEY,
+        task_id           TEXT NOT NULL REFERENCES public.tasks(task_id) ON DELETE CASCADE,
+        name              TEXT NOT NULL,
+        path              TEXT NOT NULL,
+        type              TEXT NOT NULL,
+        size              INTEGER NOT NULL,
+        summary           TEXT,
+        content           TEXT NOT NULL,
+        indexing_status   TEXT DEFAULT 'PENDING',
+        indexing_error    TEXT,
+        indexed_at        TIMESTAMPTZ,
+        retry_count       INTEGER DEFAULT 0,
+        last_retry_at     TIMESTAMPTZ,
+        next_retry_at     TIMESTAMPTZ,
+        claimed_by        TEXT,
+        claimed_at        TIMESTAMPTZ,
+        lease_expiration  TIMESTAMPTZ,
+        created_at        TIMESTAMPTZ DEFAULT now(),
+        updated_at        TIMESTAMPTZ DEFAULT now(),
+        UNIQUE(task_id, name)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_artifacts_task_id ON public.task_artifacts (task_id);
+    CREATE INDEX IF NOT EXISTS idx_task_artifacts_indexing_status ON public.task_artifacts (indexing_status);
+    ALTER TABLE public.task_artifacts ENABLE ROW LEVEL SECURITY;
+
+    -- 9. Create task_knowledge table for semantic search
+    CREATE TABLE IF NOT EXISTS public.task_knowledge (
+        id             BIGSERIAL PRIMARY KEY,
+        task_id        TEXT NOT NULL REFERENCES public.tasks(task_id) ON DELETE CASCADE,
+        name           TEXT NOT NULL,
+        chunk_index    INTEGER NOT NULL,
+        chunk_text     TEXT NOT NULL,
+        embedding      JSONB NOT NULL,
+        promoted_level TEXT DEFAULT 'TASK',
+        created_at     TIMESTAMPTZ DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_task_knowledge_task_id ON public.task_knowledge (task_id);
+    CREATE INDEX IF NOT EXISTS idx_task_knowledge_promoted_level ON public.task_knowledge (promoted_level);
+    ALTER TABLE public.task_knowledge ENABLE ROW LEVEL SECURITY;

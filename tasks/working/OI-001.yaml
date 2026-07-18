@@ -1,0 +1,22 @@
+acceptance_criteria:
+- Run LIST_FILES
+autonomy_level: 2
+claimed_at: '2026-07-18T10:43:55.486695'
+constraints:
+- Read-only
+context: Auditing backend readiness
+evidence:
+  error: ANTIGRAVITY_LS_ADDRESS is not set
+  project: oi_labs
+  status: FAILED
+  summary: 'Failed to dispatch to Antigravity: ANTIGRAVITY_LS_ADDRESS is not set'
+  task_id: OI-001
+last_heartbeat_at: '2026-07-18T10:43:55.486695'
+objective: Audit dataset training readiness
+project: oi_labs
+status: failed
+task_id: OI-001
+task_type: audit
+validation_commands:
+- git status --short
+worker_id: worker-77b160f6

@@ -1,0 +1,22 @@
+acceptance_criteria:
+- Run LIST_FILES
+autonomy_level: 2
+claimed_at: '2026-07-18T10:43:55.460013'
+constraints:
+- Read-only
+context: Auditing membership frontend/backend
+evidence:
+  error: ANTIGRAVITY_LS_ADDRESS is not set
+  project: dkffj
+  status: FAILED
+  summary: 'Failed to dispatch to Antigravity: ANTIGRAVITY_LS_ADDRESS is not set'
+  task_id: DKFFJ-001
+last_heartbeat_at: '2026-07-18T10:43:55.460013'
+objective: Test membership workflow
+project: dkffj
+status: failed
+task_id: DKFFJ-001
+task_type: audit
+validation_commands:
+- git status --short
+worker_id: worker-77b160f6

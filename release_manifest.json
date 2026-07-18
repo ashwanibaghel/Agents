@@ -1,0 +1,35 @@
+{
+  "version": "3.2.0",
+  "release_date": "2026-07-17T18:58:53.686009Z",
+  "git_commit": "229599bc6094a1e912fa31779092506799ebcfbb",
+  "git_tag": "v3.2.0",
+  "branch": "task/V3.2-S6",
+  "python_version": "3.11.5",
+  "database_version": "1.0.0",
+  "config_version": "3.2",
+  "supported_platforms": [
+    "Linux",
+    "Windows",
+    "macOS"
+  ],
+  "feature_flags": {
+    "config_version": "3.2.0",
+    "feature_flags": {
+      "persistent_sessions": true,
+      "structured_logging": true,
+      "metrics": true,
+      "auto_push": true,
+      "chaos_testing": false,
+      "backup": true
+    }
+  },
+  "required_environment": [
+    "SUPABASE_URL",
+    "SUPABASE_SERVICE_KEY",
+    "BRIDGE_TOKEN"
+  ],
+  "schema_versions": {
+    "sqlite": "3.2.0",
+    "supabase": "3.2.0"
+  }
+}

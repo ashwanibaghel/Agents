@@ -21,8 +21,17 @@ class ReceiptMonitor:
             return None
             
         try:
-            with open(receipt_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            content = None
+            for enc in ["utf-8-sig", "utf-16", "cp1252"]:
+                try:
+                    with open(receipt_path, "r", encoding=enc) as f:
+                        content = f.read()
+                    break
+                except UnicodeDecodeError:
+                    continue
+            if content is None:
+                raise ValueError("Could not decode file with utf-8, utf-16, or cp1252.")
+            data = json.loads(content)
         except json.JSONDecodeError as jde:
             return {"success": False, "error": f"Malformed JSON: {str(jde)}"}
         except Exception as e:
