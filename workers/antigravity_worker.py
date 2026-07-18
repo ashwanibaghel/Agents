@@ -181,7 +181,7 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
 
         # Failure — release lock
         self.runtime.sessions.release_lock(project, worker_id)
-        print(f"❌ Git prepare branch failed: {res_git['error']}")
+        print(f"[ERROR] Git prepare branch failed: {res_git['error']}")
         return {
             "task_id": task_id,
             "project": project,
@@ -189,19 +189,19 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
             "reason": res_git["error"],
         }
 
-    def _create_or_resume_session(self, task: dict) -> tuple[str | None, str]:
-        """Load or create persistent conversation session. Returns (conv_id, session_status)."""
+    def _create_or_resume_session(self, task: dict) -> tuple[dict, any, str, str | None, str]:
+        """Load or create persistent conversation session. Returns (res_dict, session, session_status, conv_id, model)."""
         project = task.get("project")
         trace_id = task.get("trace_id")
         task_id = task.get("id")
         task_type = task.get("task_type")
 
         session = self.runtime.sessions.get_session(project)
-        session_status = "EXPIRED"
+        session_status = "MISSING"
 
         if session:
             session_status = self.runtime.sessions.check_session_status(project, self.client)
-            if session_status == "EXPIRED":
+            if session_status == "MISSING":
                 metrics_manager.increment_counter("session_expiry_count")
 
         conv_id = None
@@ -217,8 +217,17 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
 
         model = "pro" if task.get("autonomy_level", 2) >= 2 else "flash"
 
+        if session_status == "BROKEN":
+            # Proactive check failed with temporary infrastructure error
+            res = {
+                "success": False,
+                "error": f"Proactive connection check failed with status BROKEN: {session.get('last_error') or 'connection issue'}"
+            }
+            return res, session, session_status, session.get("conversation_id"), model
+
+        res = None
         if conv_id:
-            print(f"🔄 Resuming persistent conversation {conv_id} for project {project}...")
+            print(f"[RESUME] Resuming persistent conversation {conv_id} for project {project}...")
             metrics_manager.record_conversation_reuse(trace_id, True)
             log_transition(
                 "SESSION_REUSED", "REUSED", task_id, project, trace_id,
@@ -226,10 +235,48 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
                 branch=f"task-{task_id}" if task_type == "feature" else "main",
             )
             res = self.client.send_message(conv_id, full_prompt)
-        else:
-            print(f"✨ Creating new persistent conversation session for project {project}...")
+            
+            # If resumption fails, check if the error indicates a missing conversation
+            if not res.get("success"):
+                err_msg = str(res.get("error") or "").lower()
+                if any(term in err_msg for term in ["not found", "expired", "could not find", "deleted"]):
+                    print(f"[WARNING] Resumption failed because conversation {conv_id} is MISSING. Creating a new one...")
+                    conv_id = None # Let it fall through to new_conversation
+                    session_status = "MISSING"
+                else:
+                    # Temporary connection issue during resumption (BROKEN)
+                    session_status = "BROKEN"
+                    
+        if not conv_id and session_status == "MISSING":
+            print(f"[NEW] Creating new persistent conversation session for project {project}...")
             metrics_manager.record_conversation_reuse(trace_id, False)
             res = self.client.new_conversation(full_prompt, model=model)
+            
+            if res.get("success"):
+                new_conv_id = AntigravityClient.extract_conversation_id(res.get("response", {}))
+                if not new_conv_id:
+                    new_conv_id = AntigravityClient.extract_conversation_id(res)
+                if new_conv_id:
+                    conv_id = new_conv_id
+                    # Reset retry state on successful new conversation
+                    self.runtime.sessions.save_session(
+                        project_id=project,
+                        conversation_id=conv_id,
+                        status="ACTIVE",
+                        retry_count=0,
+                        last_error=None,
+                        next_retry_at=None
+                    )
+                    # Refresh session ref
+                    session = self.runtime.sessions.get_session(project)
+                    session_status = "ACTIVE"
+            else:
+                # If creating new conversation fails, check if it's a temporary connection issue
+                err_msg = str(res.get("error") or "").lower()
+                if any(term in err_msg for term in ["not found", "expired", "could not find", "deleted"]):
+                    session_status = "MISSING"
+                else:
+                    session_status = "BROKEN"
 
         return res, session, session_status, conv_id, model
 
@@ -252,9 +299,12 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
             default_branch=default_branch,
             current_branch=f"task-{task_id}" if task_type == "feature" else default_branch,
             status="ACTIVE",
+            retry_count=0,
+            last_error=None,
+            next_retry_at=None
         )
 
-        if not session or session_status == "EXPIRED":
+        if not session or session_status == "MISSING":
             log_transition(
                 "SESSION_CREATED", "CREATED", task_id, project, trace_id,
                 conversation_id=conv_id,
@@ -276,6 +326,59 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
                 delegation_status="delegated",
             )
 
+    def _handle_broken_retry(self, project: str, task_id: str, error_reason: str, session, worker_id: str) -> dict:
+        """Handle BROKEN state retry increments, exponential backoff, or final FAILED state."""
+        retry_count = 1
+        conv_id = None
+        if session:
+            retry_count = (session.get("retry_count") or 0) + 1
+            conv_id = session.get("conversation_id")
+            
+        if retry_count > 4:
+            print(f"[ERROR] Max retry attempts exceeded ({retry_count - 1} retries). Failing task {task_id}.")
+            self.runtime.sessions.release_lock(project, worker_id)
+            # Reset retry info for future tasks
+            self.runtime.sessions.save_session(
+                project_id=project,
+                conversation_id=conv_id,
+                status="ACTIVE",
+                retry_count=0,
+                last_error=None,
+                next_retry_at=None
+            )
+            return {
+                "task_id": task_id,
+                "project": project,
+                "status": "FAILED",
+                "summary": f"Failed after max retry attempts. Last error: {error_reason}",
+                "error": error_reason
+            }
+        else:
+            # Calculate backoff duration: 30s, 120s, 300s, 900s
+            durations = {1: 30, 2: 120, 3: 300, 4: 900}
+            backoff_secs = durations.get(retry_count, 900)
+            next_retry = (datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(seconds=backoff_secs)).isoformat()
+            
+            # Save retry info to project session
+            self.runtime.sessions.save_session(
+                project_id=project,
+                conversation_id=conv_id,
+                status="BROKEN",
+                retry_count=retry_count,
+                last_error=error_reason,
+                next_retry_at=next_retry
+            )
+            
+            self.runtime.sessions.release_lock(project, worker_id)
+            
+            return {
+                "task_id": task_id,
+                "project": project,
+                "status": "DELEGATED",
+                "conversation_id": conv_id or f"missing-conv-id-{task_id}",
+                "summary": f"Temporary infrastructure failure (retry {retry_count} of 4). Backoff for {backoff_secs}s. Error: {error_reason}"
+            }
+
     # ── Public interface ─────────────────────────────────────────────────────
 
     def dispatch_task(self, task: dict, workspace_info: dict, worker_id: str) -> dict:
@@ -289,12 +392,29 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
         # Stash workspace_path for helpers that need it
         task["_workspace_path"] = workspace_path
 
+        # Check if the project has a pending retry backoff
+        session = self.runtime.sessions.get_session(project)
+        if session and session.get("next_retry_at"):
+            try:
+                next_retry = datetime.datetime.fromisoformat(session["next_retry_at"].replace("Z", "+00:00"))
+                if datetime.datetime.now(datetime.timezone.utc) < next_retry:
+                    print(f"[BACKOFF] Project {project} is in backoff until {session['next_retry_at']}. Skipping dispatch retry...")
+                    return {
+                        "task_id": task_id,
+                        "project": project,
+                        "status": "DELEGATED",
+                        "conversation_id": session.get("conversation_id") or f"missing-conv-id-{task_id}",
+                        "summary": f"Task is waiting for backoff retry (retry {session.get('retry_count')})."
+                    }
+            except Exception as e:
+                print(f"[WARNING] Error parsing next_retry_at: {e}")
+
         # 1. Project isolation check
         self.validate_isolation(project, workspace_path)
 
         # 2. Acquire database-backed workspace lock
         if not self.runtime.sessions.acquire_lock(project, worker_id):
-            print(f"🔒 Workspace lock acquisition failed for project '{project}' (already locked by another worker).")
+            print(f"[LOCKED] Workspace lock acquisition failed for project '{project}' (already locked by another worker).")
             return {
                 "task_id": task_id,
                 "project": project,
@@ -315,6 +435,13 @@ OPERATIONAL CONSTRAINTS for Antigravity Agent:
 
         # 5. Load or create persistent conversation session
         res, session, session_status, conv_id, model = self._create_or_resume_session(task)
+
+        if session_status == "BROKEN":
+            error_reason = res.get("error") or "Temporary connection issue"
+            retry_res = self._handle_broken_retry(project, task_id, error_reason, session, worker_id)
+            if self.task_source and retry_res.get("status") == "FAILED":
+                self.task_source.update_task_status(task_id, "failed", retry_res)
+            return retry_res
 
         if not res["success"]:
             self.runtime.sessions.release_lock(project, worker_id)

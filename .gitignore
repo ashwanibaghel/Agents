@@ -54,10 +54,14 @@ venv.bak/
 
 # Project specific ignores
 config/supabase.yaml
-state/task_checkpoints.db
+state/task_checkpoints.db*
+state/task_checkpoints_test.db
+
+state/backups/
 state/receipts/*.json
 workspaces/
 logs/
 *.log
 start_worker_invisibly.vbs
 state/worker_id.txt
+

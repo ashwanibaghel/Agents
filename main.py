@@ -1,6 +1,16 @@
 import sys
 import yaml
 import os
+import socket
+
+# Programmatically resolve unresponsive local DNS for Supabase host (V3.2.1 DNS patch)
+_original_getaddrinfo = socket.getaddrinfo
+def _custom_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host == "xrimbjoxmwqxryvxdojz.supabase.co":
+        return _original_getaddrinfo("104.18.38.10", port, family, type, proto, flags)
+    return _original_getaddrinfo(host, port, family, type, proto, flags)
+socket.getaddrinfo = _custom_getaddrinfo
+
 import time
 import signal
 from dotenv import load_dotenv
@@ -23,6 +33,11 @@ from control.task_parser import TaskParser
 from control.receipt_monitor import ReceiptMonitor
 from control.result_verifier import ResultVerifier
 from control.structured_logger import logger
+
+
+# NOTE: Embedding generation removed from worker.
+# Worker only stores artifacts with PENDING status and publishes events.
+# KnowledgeIndexerService (knowledge_indexer_service.py) handles async indexing.
 from control import error_codes
 from control.metrics_manager import metrics_manager
 from control.backup_manager import BackupManager
@@ -131,33 +146,185 @@ def main():
         if proj_id in all_agents
     }
 
-    # Detect Supabase config
-    supabase_cfg_path = "config/supabase.yaml"
-    use_supabase = False
-    task_source = None
+    # Resolve configuration using the shared config resolver
+    from control.config_resolver import resolve_config
+    cfg = resolve_config()
+    app_env = cfg["app_env"]
+    use_supabase = cfg["supabase_enabled"]
+    config_source = cfg["configuration_source"]
+    yaml_enabled = cfg["yaml_enabled"]
+    env_override = cfg["env_override"]
 
-    if os.path.exists(supabase_cfg_path):
-        try:
-            with open(supabase_cfg_path, "r", encoding="utf-8") as _f:
-                _sb = yaml.safe_load(_f)
-            if _sb and _sb.get("enabled", False):
-                from control.supabase_task_source import SupabaseTaskSource
-                task_source = SupabaseTaskSource(
-                    supabase_url=_sb["supabase_url"],
-                    supabase_key=_sb["supabase_key"],
-                )
-                use_supabase = True
-                logger.info("Task source initialized: Supabase", step="STARTUP")
-        except Exception as _e:
-            logger.warning(f"Supabase config load failed: {_e} — falling back to local", error_code=error_codes.SUPABASE_001, step="STARTUP")
+    worker_id = logger.worker_id
+
+    # Retrieve Supabase credentials if use_supabase is True
+    sb_url = os.environ.get("SUPABASE_URL")
+    sb_key = os.environ.get("SUPABASE_SERVICE_KEY") or os.environ.get("SUPABASE_KEY")
+    if use_supabase and (not sb_url or not sb_key):
+        # Fallback to YAML keys if environment does not specify them
+        supabase_cfg_path = "config/supabase.yaml"
+        if os.path.exists(supabase_cfg_path):
+            try:
+                with open(supabase_cfg_path, "r", encoding="utf-8") as _f:
+                    _sb = yaml.safe_load(_f) or {}
+                if not sb_url:
+                    sb_url = _sb.get("supabase_url")
+                if not sb_key:
+                    sb_key = _sb.get("supabase_key")
+            except Exception:
+                pass
+
+    # Print the worker startup banner
+    print("================================================")
+    print("Worker Mode")
+    print(f"APP_ENV              : {app_env}")
+    print(f"Task Source          : {'Supabase' if use_supabase else 'Local Filesystem'}")
+    print(f"Supabase Enabled     : {str(use_supabase).upper()}")
+    print(f"Configuration Source : {config_source}")
+    print(f"Worker ID            : {worker_id}")
+    print(f"Bridge URL           : {os.environ.get('BRIDGE_URL', 'Not Configured')}")
+    print("================================================")
+
+    # Fail fast: if APP_ENV=production and task_source is Local Task Source, refuse startup
+    if app_env == "production" and not use_supabase:
+        print("FATAL: Production worker cannot start with LocalTaskSource. Expected: SupabaseTaskSource. Startup aborted.", file=sys.stderr)
+        sys.exit(1)
 
     if not use_supabase:
+        print("WARNING: Worker is running in LOCAL MODE. Supabase tasks will NOT be processed.")
+        logger.info("Worker started in LOCAL MODE", step="STARTUP")
+
+    task_source = None
+    if use_supabase:
+        if not sb_url or not sb_key:
+            print("FATAL: Supabase enabled but URL or key is missing. Startup aborted.", file=sys.stderr)
+            sys.exit(1)
+        from control.supabase_task_source import SupabaseTaskSource
+        task_source = SupabaseTaskSource(
+            supabase_url=sb_url,
+            supabase_key=sb_key,
+        )
+        logger.info("Task source initialized: Supabase", step="STARTUP")
+        
+        # Extended Startup Self-Test Suite
+        print("Running startup self-test suite...")
+        import requests
+        import datetime
+        import json
+        timestamp = int(time.time())
+        test_task_id = f"SYSTEM-SELFTEST-{worker_id.upper()}-{timestamp}"
+        test_claim_id = f"SYSTEM-SELFTEST-CLAIM-{worker_id.upper()}-{timestamp}"
+        
+        passed_checks = {
+            "read": False,
+            "write": False,
+            "claim": False,
+            "heartbeat": False
+        }
+        
+        try:
+            # 1. Read Permission Check
+            try:
+                url = f"{task_source.supabase_url}/rest/v1/tasks?select=task_id&limit=1"
+                r = requests.get(url, headers=task_source.headers, timeout=5.0)
+                if r.status_code == 200:
+                    passed_checks["read"] = True
+                    print("✓ Read permission check: PASS")
+                else:
+                    print(f"✗ Read permission check: FAIL ({r.status_code}): {r.text}")
+            except Exception as e:
+                print(f"✗ Read permission check: FAIL (Error: {e})")
+
+            # 2. Write/Upsert Permission Check
+            try:
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                payload = {
+                    "task_id": test_task_id,
+                    "project": "system",
+                    "task_type": "audit",
+                    "objective": "Worker startup self-test write check",
+                    "status": "done",
+                    "worker_id": worker_id,
+                    "last_heartbeat_at": now_iso,
+                    "updated_at": now_iso,
+                    "context": json.dumps({"test": "write_check"})
+                }
+                headers = {**task_source.headers, "Prefer": "resolution=merge-duplicates"}
+                url = f"{task_source.supabase_url}/rest/v1/tasks?on_conflict=task_id"
+                r = requests.post(url, headers=headers, json=payload, timeout=5.0)
+                if r.status_code in (200, 201, 204):
+                    passed_checks["write"] = True
+                    print("✓ Write permission check: PASS")
+                else:
+                    print(f"✗ Write permission check: FAIL ({r.status_code}): {r.text}")
+            except Exception as e:
+                print(f"✗ Write permission check: FAIL (Error: {e})")
+
+            # 3. Claim Task Permission Check
+            try:
+                now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
+                payload = {
+                    "task_id": test_claim_id,
+                    "project": "system",
+                    "task_type": "audit",
+                    "objective": "Worker startup self-test claim check",
+                    "status": "inbox",
+                    "worker_id": None,
+                    "last_heartbeat_at": None,
+                    "updated_at": now_iso
+                }
+                headers = {**task_source.headers, "Prefer": "resolution=merge-duplicates"}
+                url = f"{task_source.supabase_url}/rest/v1/tasks?on_conflict=task_id"
+                r_create = requests.post(url, headers=headers, json=payload, timeout=5.0)
+                if r_create.status_code in (200, 201, 204):
+                    claim_ok = task_source.claim_task(test_claim_id, worker_id)
+                    if claim_ok:
+                        passed_checks["claim"] = True
+                        print("✓ Claim task permission check: PASS")
+                    else:
+                        print("✗ Claim task permission check: FAIL (claim_task returned False)")
+                else:
+                    print(f"✗ Claim task permission check: FAIL (could not create test task, code {r_create.status_code}): {r_create.text}")
+            except Exception as e:
+                print(f"✗ Claim task permission check: FAIL (Error: {e})")
+
+            # 4. Heartbeat Update Permission Check
+            if passed_checks["claim"]:
+                try:
+                    heartbeat_ok = task_source.heartbeat_task(test_claim_id, worker_id)
+                    if heartbeat_ok:
+                        passed_checks["heartbeat"] = True
+                        print("✓ Heartbeat update permission check: PASS")
+                    else:
+                        print("✗ Heartbeat update permission check: FAIL (heartbeat_task returned False)")
+                except Exception as e:
+                    print(f"✗ Heartbeat update permission check: FAIL (Error: {e})")
+            else:
+                print("✗ Heartbeat update permission check: FAIL (skipped because claim check failed)")
+
+        finally:
+            print("Cleaning up startup self-test records...")
+            for tid in (test_task_id, test_claim_id):
+                try:
+                    url = f"{task_source.supabase_url}/rest/v1/tasks?task_id=eq.{tid}"
+                    requests.delete(url, headers=task_source.headers, timeout=5.0)
+                except Exception as e:
+                    print(f"⚠️ Failed to clean up self-test record {tid}: {e}")
+
+        all_passed = all(passed_checks.values())
+        if not all_passed:
+            print("Startup self-test suite: FAILED")
+            if app_env == "production":
+                print("FATAL: Startup self-test failed in production. Aborting startup.", file=sys.stderr)
+                sys.exit(1)
+        else:
+            print("Startup self-test suite: ALL PASSED")
+
+    else:
         task_source = LocalTaskSource(base_dir="tasks")
         logger.info("Task source initialized: Local filesystem", step="STARTUP")
 
     checkpoint_manager = CheckpointManager(db_path="state/task_checkpoints.db")
-
-    worker_id = logger.worker_id
     metrics_manager.record_worker_boot(worker_id)
     worker_mode = config.get("company", {}).get("worker_mode", "scripted")
 
@@ -377,6 +544,31 @@ def main():
                                 log_transition("VERIFICATION_PASSED", "PASSED", task_id, project, trace_ids.get(task_id), conversation_id=conv_id)
                                 result["status"] = "DONE"
                                 summary_text = receipt_data.get("summary") or ""
+                                
+                                # Ingest task artifacts via ArtifactService (async indexing via EventBus)
+                                evidence_paths = receipt_data.get("evidence_paths", [])
+                                try:
+                                    from control.artifact_service import ArtifactService
+                                    from control.storage_provider import LocalStorageProvider
+                                    from control.event_bus import DatabasePollingEventBus
+                                    _storage = LocalStorageProvider(base_dir=workspace_info.get("workspace", ""))
+                                    _event_bus = DatabasePollingEventBus()
+                                    _artifact_svc = ArtifactService(
+                                        storage_provider=_storage,
+                                        event_bus=_event_bus
+                                    )
+                                    saved_artifacts = _artifact_svc.save_artifacts(task_id, evidence_paths)
+                                    result["artifacts"] = saved_artifacts
+                                    result["knowledge"] = []  # Indexing is asynchronous
+                                    print(f"📦 [{task_id}] Saved {len(saved_artifacts)} artifact(s) with PENDING indexing status.")
+                                except Exception as _art_err:
+                                    print(f"⚠️ [{task_id}] ArtifactService error (non-fatal): {_art_err}")
+                                    result["artifacts"] = []
+                                    result["knowledge"] = []
+                                result["summary"] = summary_text
+                                result["evidence_paths"] = evidence_paths
+                                result["files_changed"] = receipt_data.get("files_changed", [])
+                                result["validation_results"] = receipt_data.get("validation_results", [])
                                 task_type = original_agent_task.get("task_type") if original_agent_task else "code"
                                 if task_type == "feature":
                                     print(f"🚀 Publishing verified changes to Git for task {task_id}...")

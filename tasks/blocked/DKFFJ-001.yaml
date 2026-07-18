@@ -1,0 +1,23 @@
+acceptance_criteria:
+- Run LIST_FILES
+autonomy_level: 2
+claimed_at: '2026-07-18T10:39:30.710911'
+constraints:
+- Read-only
+context: Auditing membership frontend/backend
+evidence:
+  project: DKFFJ
+  reason: "Failed to pull latest changes safely: Cmd('git') failed due to: exit code(128)\n\
+    \  cmdline: git fetch --all\n  stderr: 'fatal: unable to access 'https://github.com/ashwanibaghel/dkffj.git/':\
+    \ Could not resolve host: github.com'"
+  status: BLOCKED
+  task_id: DKFFJ-001
+last_heartbeat_at: '2026-07-18T10:39:30.710911'
+objective: Test membership workflow
+project: dkffj
+status: blocked
+task_id: DKFFJ-001
+task_type: audit
+validation_commands:
+- git status --short
+worker_id: worker-77b160f6

@@ -19,7 +19,7 @@ class ResultVerifier:
         if not summary or len(summary.strip()) < 10:
             return False, "Receipt summary is missing or too short.", {}
             
-        if task_type == "audit":
+        if task_type in ["audit", "research"]:
             # 1. Non-empty evidence_paths
             evidence_paths = receipt_data.get("evidence_paths", [])
             if not evidence_paths:
@@ -40,11 +40,12 @@ class ResultVerifier:
                     return False, f"Evidence path '{path}' does not exist on disk.", {}
 
             # 3. Independently verify repository remains clean
-            res_git = TerminalTool.run_command(workspace_path, "git status --short")
-            if not res_git.get("success"):
-                return False, f"Failed to run git status check: {res_git.get('error')}", {}
-            if res_git.get("output", "").strip():
-                return False, f"Audit task left repository dirty: {res_git.get('output')}", {}
+            if task_type == "audit":
+                res_git = TerminalTool.run_command(workspace_path, "git status --short")
+                if not res_git.get("success"):
+                    return False, f"Failed to run git status check: {res_git.get('error')}", {}
+                if res_git.get("output", "").strip():
+                    return False, f"Audit task left repository dirty: {res_git.get('output')}", {}
 
             # 4. Rerun validation commands
             commands = task.get("validation_commands", [])

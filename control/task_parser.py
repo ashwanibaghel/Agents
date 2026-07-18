@@ -17,8 +17,8 @@ class TaskParser:
                     raise ValueError(f"Required field '{field}' is missing.")
             
             # Validate task_type
-            if data["task_type"] not in ["audit", "code", "feature"]:
-                raise ValueError(f"Invalid task_type: '{data['task_type']}'. Expected 'audit', 'code', or 'feature'.")
+            if data["task_type"] not in ["audit", "code", "feature", "research"]:
+                raise ValueError(f"Invalid task_type: '{data['task_type']}'. Expected 'audit', 'code', 'feature', or 'research'.")
                 
             return Task.from_dict(data)
         except Exception as e:

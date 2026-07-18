@@ -82,6 +82,7 @@ class Dispatcher:
                     "project": agent.project,
                     "status": "BLOCKED",
                     "reason": str(prep_error),
+                    "summary": f"Workspace preparation failed: {str(prep_error)}",
                 }
 
             # 2. Execute task
@@ -97,6 +98,7 @@ class Dispatcher:
                     "project": agent.project,
                     "status": "FAILED",
                     "error": str(exec_error),
+                    "summary": f"Task execution failed: {str(exec_error)}",
                 }
 
         except Exception as error:

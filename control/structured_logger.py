@@ -4,21 +4,33 @@ import json
 import uuid
 import time
 import datetime
-from typing import Optional, Any
+from typing import Optional
 
 class StructuredLogger:
-    def __init__(self, log_dir: str = "logs", worker_id_file: str = "state/worker_id.txt"):
+    """
+    Production structured JSON logger.
+
+    Every log line is a JSON object with fields:
+      timestamp, service, worker_id, task_id, artifact,
+      event, duration_ms, status, error, message, level,
+      trace_id, project_id, conversation_id, branch, step, error_code
+    """
+    def __init__(
+        self,
+        service: str = "worker",
+        log_dir: str = "logs",
+        worker_id_file: str = "state/worker_id.txt"
+    ):
+        self.service = service
         self.log_dir = os.path.abspath(log_dir)
-        self.log_file = os.path.join(self.log_dir, "production_worker.log")
+        self.log_file = os.path.join(self.log_dir, f"{service}.log")
         self.worker_id_file = os.path.abspath(worker_id_file)
         self.worker_id = ""
         self.file_logging_enabled = False
-        
         self._init_worker_id()
         self._init_file_logger()
 
     def _init_worker_id(self):
-        """Generate and save a persistent worker UUID or reuse existing."""
         try:
             os.makedirs(os.path.dirname(self.worker_id_file), exist_ok=True)
             if os.path.exists(self.worker_id_file):
@@ -29,83 +41,98 @@ class StructuredLogger:
                 with open(self.worker_id_file, "w", encoding="utf-8") as f:
                     f.write(self.worker_id)
         except Exception as e:
-            # Best-effort fallback
             self.worker_id = f"worker-fallback-{str(uuid.uuid4())[:8]}"
-            print(f"⚠️ Logger: Failed to persist worker UUID: {e}. Using transient ID: {self.worker_id}", file=sys.stderr)
 
     def _init_file_logger(self):
-        """Initialize file logging directory and file handle safely."""
         try:
             os.makedirs(self.log_dir, exist_ok=True)
-            # Try to write a test line to verify write permissions
-            with open(self.log_file, "a", encoding="utf-8") as f:
+            with open(self.log_file, "a", encoding="utf-8"):
                 self.file_logging_enabled = True
-        except Exception as e:
+        except Exception:
             self.file_logging_enabled = False
-            print(f"⚠️ Logger: File logging disabled. Directory creation or file access failed: {e}", file=sys.stderr)
 
     def log(
         self,
         level: str,
         message: str,
-        trace_id: Optional[str] = None,
+        # Core identity fields
+        service: Optional[str] = None,
+        worker_id: Optional[str] = None,
         task_id: Optional[str] = None,
+        artifact: Optional[str] = None,
+        event: Optional[str] = None,
+        # Timing & outcome
+        duration_ms: Optional[float] = None,
+        status: Optional[str] = None,
+        error: Optional[str] = None,
+        # Legacy / extended
+        trace_id: Optional[str] = None,
         project_id: Optional[str] = None,
         conversation_id: Optional[str] = None,
         branch: Optional[str] = None,
         step: Optional[str] = None,
-        duration_ms: Optional[int] = None,
-        status: Optional[str] = None,
-        error_code: Optional[str] = None
+        error_code: Optional[str] = None,
+        # Arbitrary extra fields
+        **extra
     ):
-        """Build and output a JSON structured log entry safely."""
         try:
-            log_entry = {
-                "timestamp": datetime.datetime.utcnow().isoformat() + "Z",
-                "level": level.upper(),
-                "trace_id": trace_id or "",
-                "worker_id": self.worker_id,
-                "task_id": task_id or "",
-                "project_id": project_id or "",
+            entry = {
+                "timestamp":       datetime.datetime.utcnow().isoformat() + "Z",
+                "level":           level.upper(),
+                "service":         service or self.service,
+                "worker_id":       worker_id or self.worker_id,
+                "task_id":         task_id or "",
+                "artifact":        artifact or "",
+                "event":           event or "",
+                "duration_ms":     round(duration_ms, 3) if duration_ms is not None else None,
+                "status":          status or "",
+                "error":           error or "",
+                "message":         message,
+                # Extended fields
+                "trace_id":        trace_id or "",
+                "project_id":      project_id or "",
                 "conversation_id": conversation_id or "",
-                "branch": branch or "",
-                "step": step or "",
-                "duration_ms": duration_ms if duration_ms is not None else "",
-                "status": status or "",
-                "error_code": error_code or "",
-                "message": message
+                "branch":          branch or "",
+                "step":            step or "",
+                "error_code":      error_code or "",
             }
-            
-            # Serialize
-            log_json = json.dumps(log_entry)
-            
-            # Output to stdout/stderr based on level
-            if level.upper() in ["ERROR", "CRITICAL"]:
-                sys.stderr.write(log_json + "\n")
-                sys.stderr.flush()
+            # Strip None values to keep log lines lean
+            entry = {k: v for k, v in entry.items() if v is not None and v != ""}
+            if extra:
+                entry.update(extra)
+
+            line = json.dumps(entry, ensure_ascii=False)
+
+            if level.upper() in ("ERROR", "CRITICAL"):
+                sys.stderr.write(line + "\n"); sys.stderr.flush()
             else:
-                sys.stdout.write(log_json + "\n")
-                sys.stdout.flush()
-                
-            # Output to file if enabled
+                sys.stdout.write(line + "\n"); sys.stdout.flush()
+
             if self.file_logging_enabled:
                 try:
                     with open(self.log_file, "a", encoding="utf-8") as f:
-                        f.write(log_json + "\n")
-                except Exception as fe:
-                    # Fallback so logger never crashes the main app
-                    print(f"⚠️ Logger: Failed to write log entry to file: {fe}", file=sys.stderr)
-                    
-        except Exception as le:
-            # Final line of defense to prevent crashing
-            print(f"⚠️ Logger Critical Failure: {le}", file=sys.stderr)
+                        f.write(line + "\n")
+                except Exception:
+                    pass
+        except Exception as e:
+            sys.stderr.write(f"LOGGER_FAILURE: {e}\n")
 
-    # Convenience methods
-    def debug(self, msg, **kwargs): self.log("DEBUG", msg, **kwargs)
-    def info(self, msg, **kwargs): self.log("INFO", msg, **kwargs)
-    def warning(self, msg, **kwargs): self.log("WARNING", msg, **kwargs)
-    def error(self, msg, **kwargs): self.log("ERROR", msg, **kwargs)
-    def critical(self, msg, **kwargs): self.log("CRITICAL", msg, **kwargs)
+    # ── Convenience helpers ──────────────────────────────────────────────
+    def debug(self, msg, **kw):    self.log("DEBUG",    msg, **kw)
+    def info(self, msg, **kw):     self.log("INFO",     msg, **kw)
+    def warning(self, msg, **kw):  self.log("WARNING",  msg, **kw)
+    def error(self, msg, **kw):    self.log("ERROR",    msg, **kw)
+    def critical(self, msg, **kw): self.log("CRITICAL", msg, **kw)
 
-# Global singleton logger instance for use across the application
-logger = StructuredLogger()
+    def event(self, event_name: str, task_id: str = "", artifact: str = "",
+              duration_ms: float = None, status: str = "OK", **kw):
+        """Log a named pipeline event with full context."""
+        self.log("INFO", f"[{event_name}] {status}",
+                 event=event_name, task_id=task_id, artifact=artifact,
+                 duration_ms=duration_ms, status=status, **kw)
+
+
+# ── Service-specific singleton loggers ───────────────────────────────────────
+logger          = StructuredLogger(service="worker")
+indexer_logger  = StructuredLogger(service="knowledge_indexer", log_dir="logs")
+bridge_logger   = StructuredLogger(service="bridge_server",     log_dir="logs")

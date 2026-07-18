@@ -66,7 +66,8 @@ class GitTool:
                 # Fetch remote changes first
                 repo.git.fetch("--all")
                 # Pull with --ff-only to ensure safe, fast-forward changes without auto-merge to main
-                repo.git.pull("--ff-only")
+                active_branch_name = repo.active_branch.name if not repo.head.is_detached else "main"
+                repo.git.pull("origin", active_branch_name, "--ff-only")
         except Exception as e:
             raise GitError(f"Failed to pull latest changes safely: {str(e)}")
 

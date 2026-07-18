@@ -144,13 +144,96 @@ class SupabaseTaskSource(TaskSource):
             "updated_at": now_iso
         }
         
-        if status.upper() == "DONE" and evidence:
+        if mapped_status == "inbox":
+            payload.update({
+                "worker_id": None,
+                "claimed_at": None,
+                "last_heartbeat_at": None,
+                "error_message": evidence.get("error") or evidence.get("summary") if evidence else None
+            })
+        elif status.upper() == "DONE" and evidence:
             payload.update({
                 "summary": evidence.get("summary"),
                 "evidence_paths": evidence.get("evidence_paths", []),
                 "files_changed": evidence.get("files_changed", []),
                 "validation_results": evidence.get("validation_results", [])
             })
+            
+            # Batch insert/upsert artifacts to task_artifacts table
+            artifacts = evidence.get("artifacts", [])
+            if artifacts:
+                art_url = f"{self.supabase_url}/rest/v1/task_artifacts"
+                art_headers = dict(self.headers)
+                art_headers["Prefer"] = "resolution=merge-duplicates"
+                art_payloads = []
+                for art in artifacts:
+                    art_payloads.append({
+                        "task_id": task_id,
+                        "name": art["name"],
+                        "path": art["path"],
+                        "type": art["type"],
+                        "size": art["size"],
+                        "summary": art["summary"],
+                        "content": art["content"]
+                    })
+                try:
+                    r_art = requests.post(art_url, headers=art_headers, json=art_payloads, timeout=10.0)
+                    if r_art.status_code not in [200, 201]:
+                        print(f"⚠️ Failed to insert task artifacts: {r_art.text}")
+                except Exception as e:
+                    print(f"⚠️ Error inserting task artifacts: {e}")
+                    
+            # Batch insert knowledge chunks to task_knowledge table
+            knowledge = evidence.get("knowledge", [])
+            if knowledge:
+                kn_url = f"{self.supabase_url}/rest/v1/task_knowledge"
+                try:
+                    # Clear old chunks first to avoid duplicate growth on retry
+                    requests.delete(f"{kn_url}?task_id=eq.{task_id}", headers=self.headers, timeout=5.0)
+                except Exception:
+                    pass
+                kn_payloads = []
+                for kn in knowledge:
+                    kn_payloads.append({
+                        "task_id": task_id,
+                        "name": kn["name"],
+                        "chunk_index": kn["chunk_index"],
+                        "chunk_text": kn["chunk_text"],
+                        "embedding": kn["embedding"]
+                    })
+                try:
+                    r_kn = requests.post(kn_url, headers=self.headers, json=kn_payloads, timeout=10.0)
+                    if r_kn.status_code not in [200, 201]:
+                        print(f"⚠️ Failed to insert task knowledge: {r_kn.text}")
+                except Exception as e:
+                    print(f"⚠️ Error inserting task knowledge: {e}")
+
+            # Local SQLite cache sync
+            import sqlite3
+            try:
+                with sqlite3.connect("state/task_checkpoints.db") as conn:
+                    for art in artifacts:
+                        conn.execute("""
+                            INSERT INTO task_artifacts (task_id, name, path, type, size, summary, content)
+                            VALUES (?, ?, ?, ?, ?, ?, ?)
+                            ON CONFLICT(task_id, name) DO UPDATE SET
+                                path=excluded.path,
+                                type=excluded.type,
+                                size=excluded.size,
+                                summary=excluded.summary,
+                                content=excluded.content,
+                                updated_at=CURRENT_TIMESTAMP
+                        """, (task_id, art["name"], art["path"], art["type"], art["size"], art["summary"], art["content"]))
+                    
+                    conn.execute("DELETE FROM task_knowledge WHERE task_id = ?", (task_id,))
+                    for kn in knowledge:
+                        conn.execute("""
+                            INSERT INTO task_knowledge (task_id, name, chunk_index, chunk_text, embedding)
+                            VALUES (?, ?, ?, ?, ?)
+                        """, (task_id, kn["name"], kn["chunk_index"], kn["chunk_text"], json.dumps(kn["embedding"])))
+                    conn.commit()
+            except Exception as sqlite_err:
+                print(f"⚠️ SQLite artifacts cache update failed: {sqlite_err}")
         elif (status.upper() in ["FAILED", "BLOCKED"]) and evidence:
             payload.update({
                 "error_message": evidence.get("error") or evidence.get("summary")
@@ -199,17 +282,18 @@ class SupabaseTaskSource(TaskSource):
         except Exception as e:
             print(f"⚠️ Supabase release error: {str(e)}")
 
-    def heartbeat_task(self, task_id: str, worker_id: str):
+    def heartbeat_task(self, task_id: str, worker_id: str) -> bool:
         """Update last_heartbeat_at so lease remains alive during long execution."""
         url = f"{self.supabase_url}/rest/v1/tasks?task_id=eq.{task_id}&worker_id=eq.{worker_id}"
         now_iso = datetime.datetime.now(datetime.timezone.utc).isoformat()
         payload = {"last_heartbeat_at": now_iso, "updated_at": now_iso}
         try:
-            requests.patch(url, headers=self.headers, json=payload, timeout=10.0)
+            r = requests.patch(url, headers=self.headers, json=payload, timeout=10.0)
             # Also update worker_status table heartbeat
             self.update_worker_heartbeat(worker_id, task_id)
+            return r.status_code in (200, 204)
         except Exception:
-            pass
+            return False
 
     def recover_stale_tasks(self) -> int:
         """

@@ -11,6 +11,16 @@ Security:
 """
 
 import os
+import socket
+
+# Programmatically resolve unresponsive local DNS for Supabase host (V3.2.1 DNS patch)
+_original_getaddrinfo = socket.getaddrinfo
+def _custom_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if host == "xrimbjoxmwqxryvxdojz.supabase.co":
+        return _original_getaddrinfo("104.18.38.10", port, family, type, proto, flags)
+    return _original_getaddrinfo(host, port, family, type, proto, flags)
+socket.getaddrinfo = _custom_getaddrinfo
+
 import uuid
 import datetime
 import json
@@ -97,6 +107,66 @@ class TaskStatusResponse(BaseModel):
     updated_at: Optional[str]
     summary: Optional[str]
     error_message: Optional[str]
+    artifact_list: Optional[List[str]] = Field(default_factory=list)
+
+
+# ── Artifact & Semantic Search models ──────────────────────────────────────────
+
+class ArtifactMetadataResponse(BaseModel):
+    name: str
+    path: str
+    type: str
+    size: int
+    summary: Optional[str] = None
+
+class ArtifactContentResponse(BaseModel):
+    name: str
+    content: str
+
+class KnowledgeSearchRequest(BaseModel):
+    query: str
+    task_id: Optional[str] = None
+    project_id: Optional[str] = None
+
+class KnowledgeSearchItem(BaseModel):
+    name: str
+    chunk_text: str
+    similarity: float
+
+class KnowledgeSearchResponse(BaseModel):
+    matches: List[KnowledgeSearchItem]
+
+
+# ── Math & Embedding Helpers ───────────────────────────────────────────────────
+
+import math
+
+def dot_product(v1, v2):
+    return sum(x * y for x, y in zip(v1, v2))
+
+def magnitude(v):
+    return math.sqrt(sum(x * x for x in v))
+
+def cosine_similarity(v1, v2):
+    mag1 = magnitude(v1)
+    mag2 = magnitude(v2)
+    if mag1 == 0.0 or mag2 == 0.0:
+        return 0.0
+    return dot_product(v1, v2) / (mag1 * mag2)
+
+def generate_gemini_embedding(text: str, api_key: str) -> list:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={api_key}"
+    payload = {
+        "model": "models/text-embedding-004",
+        "content": {
+            "parts": [{"text": text}]
+        }
+    }
+    r = requests.post(url, json=payload, timeout=10.0)
+    if r.status_code == 200:
+        return r.json()["embedding"]["values"]
+    else:
+        raise Exception(f"Gemini API returned code {r.status_code}: {r.text}")
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -179,6 +249,7 @@ def get_task_status(task_id: str):
         updated_at=row.get("updated_at"),
         summary=row.get("summary"),
         error_message=row.get("error_message"),
+        artifact_list=row.get("evidence_paths") or []
     )
 
 
@@ -203,6 +274,7 @@ def get_boss_report():
             "updated_at": row.get("updated_at"),
             "summary": row.get("summary"),
             "error_message": row.get("error_message"),
+            "artifact_list": row.get("evidence_paths") or []
         })
 
     done = len(by_status.get("done", []))
@@ -224,6 +296,151 @@ def get_boss_report():
         },
         "tasks_by_status": by_status,
     }
+
+
+@app.get("/tasks/{task_id}/artifacts", response_model=List[ArtifactMetadataResponse], dependencies=[Depends(verify_token)])
+def get_task_artifacts(task_id: str):
+    """
+    Retrieve all artifacts (metadata only) associated with a task.
+    """
+    if not task_id.replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="Invalid task_id format")
+    rows = _sb_get(f"task_artifacts?task_id=eq.{task_id}&select=name,path,type,size,summary")
+    return [
+        ArtifactMetadataResponse(
+            name=r["name"],
+            path=r["path"],
+            type=r["type"],
+            size=r["size"],
+            summary=r.get("summary")
+        )
+        for r in rows
+    ]
+
+@app.get("/tasks/{task_id}/artifacts/{artifact_name}", response_model=ArtifactContentResponse, dependencies=[Depends(verify_token)])
+def get_task_artifact_content(task_id: str, artifact_name: str):
+    """
+    Retrieve the complete text/content of a specific task artifact.
+    """
+    if not task_id.replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="Invalid task_id format")
+    rows = _sb_get(f"task_artifacts?task_id=eq.{task_id}&name=eq.{artifact_name}&select=name,content")
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"Artifact '{artifact_name}' for task {task_id} not found")
+    return ArtifactContentResponse(
+        name=rows[0]["name"],
+        content=rows[0]["content"]
+    )
+
+@app.post("/knowledge/search", response_model=KnowledgeSearchResponse, dependencies=[Depends(verify_token)])
+def search_knowledge(req: KnowledgeSearchRequest):
+    """
+    Perform semantic vector/similarity search across all task knowledge chunks.
+    """
+    api_key = os.environ.get("GEMINI_API_KEY", "")
+    if not api_key:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured on server")
+    try:
+        query_emb = generate_gemini_embedding(req.query, api_key)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to generate query embedding: {str(e)}")
+        
+    path = "task_knowledge?select=name,chunk_text,embedding"
+    if req.task_id:
+        path += f"&task_id=eq.{req.task_id}"
+    elif req.project_id:
+        tasks = _sb_get(f"tasks?project=eq.{req.project_id}&select=task_id")
+        task_ids = [t["task_id"] for t in tasks]
+        if not task_ids:
+            return KnowledgeSearchResponse(matches=[])
+        ids_str = ",".join(task_ids)
+        path += f"&task_id=in.({ids_str})"
+        
+    rows = _sb_get(path)
+    
+    matches = []
+    for r in rows:
+        emb = r.get("embedding")
+        if isinstance(emb, str):
+            try:
+                emb = json.loads(emb)
+            except Exception:
+                continue
+        if not isinstance(emb, list) or len(emb) != 768:
+            continue
+            
+        sim = cosine_similarity(query_emb, emb)
+        matches.append(
+            KnowledgeSearchItem(
+                name=r["name"],
+                chunk_text=r["chunk_text"],
+                similarity=float(sim)
+            )
+        )
+        
+    matches.sort(key=lambda x: x.similarity, reverse=True)
+    return KnowledgeSearchResponse(matches=matches[:5])
+
+
+# ── Context Builder Endpoint ───────────────────────────────────────────────────
+
+class TaskContextResponse(BaseModel):
+    task_id: str
+    context: str
+
+@app.get("/tasks/{task_id}/context", response_model=TaskContextResponse, dependencies=[Depends(verify_token)])
+def get_task_context(task_id: str):
+    """
+    Build a full GPT-ready engineering context prompt for a task.
+    Aggregates task metadata, artifact summaries, and knowledge chunks into
+    a single rich context block the Manager can embed in system prompts.
+    """
+    if not task_id.replace("-", "").isalnum():
+        raise HTTPException(status_code=400, detail="Invalid task_id format")
+    try:
+        from control.context_builder import ContextBuilder
+        builder = ContextBuilder()
+        context_text = builder.build_task_context(task_id)
+        return TaskContextResponse(task_id=task_id, context=context_text)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to build task context: {str(e)}")
+
+
+# ── Indexer Queue Endpoint ─────────────────────────────────────────────────────
+
+class IndexerQueueItem(BaseModel):
+    task_id: str
+    name: str
+    indexing_status: str
+    retry_count: Optional[int] = 0
+    indexing_error: Optional[str] = None
+
+class IndexerQueueResponse(BaseModel):
+    total_pending: int
+    items: List[IndexerQueueItem]
+
+@app.get("/indexer/queue", response_model=IndexerQueueResponse, dependencies=[Depends(verify_token)])
+def get_indexer_queue():
+    """
+    Return all artifacts currently in a non-INDEXED state (pending, failed, retrying).
+    Used for operational monitoring of the async KnowledgeIndexer pipeline.
+    """
+    rows = _sb_get(
+        "task_artifacts?indexing_status=neq.INDEXED"
+        "&select=task_id,name,indexing_status,retry_count,indexing_error"
+        "&order=updated_at.desc&limit=100"
+    )
+    items = [
+        IndexerQueueItem(
+            task_id=r["task_id"],
+            name=r["name"],
+            indexing_status=r["indexing_status"],
+            retry_count=r.get("retry_count", 0),
+            indexing_error=r.get("indexing_error")
+        )
+        for r in rows
+    ]
+    return IndexerQueueResponse(total_pending=len(items), items=items)
 
 
 from fastapi.responses import HTMLResponse
@@ -1724,6 +1941,14 @@ def get_diagnostics():
     except Exception as e:
         diag["validator_status"] = {"error": str(e)}
 
+    # 9. Configuration Precedence fields resolved by config_resolver
+    try:
+        from control.config_resolver import resolve_config
+        cfg = resolve_config()
+        diag.update(cfg)
+    except Exception as e:
+        diag["config_resolve_error"] = str(e)
+
     return diag
 
 
@@ -1752,10 +1977,48 @@ def custom_openapi():
     if app.openapi_schema:
         return app.openapi_schema
         
+    instructions = (
+        "Ashwani Agent Company Bridge API.\n\n"
+        "CRITICAL SYSTEM INSTRUCTIONS & INTENT ROUTING RULES:\n"
+        "You are the Manager Agent for Ashwani Agent Company. You coordinate and monitor autonomous developers (Antigravity workers).\n\n"
+        "PRIORITY HIERARCHY:\n"
+        "1. Internal Actions (get_task_status, get_boss_report, create_task, get_task_artifacts, get_task_artifact_content, search_knowledge) MUST always take priority over Web Search.\n"
+        "2. If an internal Action exists, Web Search MUST NEVER be used.\n"
+        "3. Worker state, task status, receipts, reports, project context, and engineering artifacts (e.g., RECON.md, AI_MANAGER_DOCS, TECHNICAL_DISCOVERY) are strictly internal. Do not search the public internet for them.\n"
+        "4. ONLY use Web Search when the user explicitly asks for public internet information.\n\n"
+        "INTENT ROUTER MAPPINGS:\n"
+        "- Queries about worker response, reply, task status, task progress, or whether a project finished:\n"
+        "  * \"Check the worker response.\"\n"
+        "  * \"Check worker reply\"\n"
+        "  * \"Did DKFFJ finish?\"\n"
+        "  * \"Did the worker finish?\"\n"
+        "  * \"What is the status of my task?\"\n"
+        "  -> Route to get_boss_report() or get_task_status(task_id). If task_id is unknown, FIRST call get_boss_report() to find it.\n\n"
+        "- Queries about reports, receipts, output, recent discoveries, or actions taken:\n"
+        "  * \"Show me the report.\"\n"
+        "  * \"Show report\"\n"
+        "  * \"latest worker output\"\n"
+        "  * \"What did the worker do?\"\n"
+        "  * \"what happened?\"\n"
+        "  * \"Latest OI Lens discovery.\"\n"
+        "  -> Route to get_boss_report() to get the status summary of all recent tasks.\n\n"
+        "- Queries about report contents, worker findings, project structure, or specific artifacts (e.g., RECON.md, AI_MANAGER_DOCS, TECHNICAL_DISCOVERY):\n"
+        "  * \"What did the worker discover?\"\n"
+        "  * \"Summarize RECON.md\"\n"
+        "  * \"Explain discovery\"\n"
+        "  * \"What architecture did the worker find?\"\n"
+        "  * \"Show me the documentation\"\n"
+        "  -> FIRST call get_task_status(task_id) or get_boss_report() to find the task_id.\n"
+        "  -> THEN call get_task_artifacts(task_id) to inspect the list of available artifacts.\n"
+        "  -> THEN call get_task_artifact_content(task_id, name) to read the full content of the target file.\n\n"
+        "- Queries seeking semantic answers from task files or project knowledge (e.g., \"Where is auth implemented?\", \"What DB does OI Lens use?\"):\n"
+        "  -> Call search_knowledge(query, task_id, project_id) to perform semantic search, then summarize based on returned chunks."
+    )
+
     openapi_schema = get_openapi(
         title="Ashwani Agent Company Bridge API",
         version="1.0.0",
-        description="ChatGPT Action Connector bridge for managing agent tasks.",
+        description=instructions,
         routes=app.routes,
         servers=[
             {
@@ -1774,12 +2037,23 @@ def custom_openapi():
                 route.operation_id = "get_task_status"
             elif route.path == "/report":
                 route.operation_id = "get_boss_report"
+            elif route.path == "/tasks/{task_id}/artifacts":
+                route.operation_id = "get_task_artifacts"
+            elif route.path == "/tasks/{task_id}/artifacts/{artifact_name}":
+                route.operation_id = "get_task_artifact_content"
+            elif route.path == "/knowledge/search":
+                route.operation_id = "search_knowledge"
+            elif route.path == "/tasks/{task_id}/context":
+                route.operation_id = "get_task_context"
+            elif route.path == "/indexer/queue":
+                route.operation_id = "get_indexer_queue"
+
                 
     # Regenerate schema with correct operationIds
     openapi_schema = get_openapi(
         title="Ashwani Agent Company Bridge API",
         version="1.0.0",
-        description="ChatGPT Action Connector bridge for managing agent tasks.",
+        description=instructions,
         routes=app.routes,
         servers=[
             {

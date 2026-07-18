@@ -15,7 +15,7 @@ class SessionManager:
             cursor.execute("""
                 SELECT conversation_id, workspace_path, repository_url, default_branch, 
                        current_branch, last_commit, last_activity, status, locked_by, locked_at, 
-                       created_at, updated_at
+                       created_at, updated_at, retry_count, last_error, next_retry_at
                 FROM project_sessions WHERE project_id = ?
             """, (project_id,))
             row = cursor.fetchone()
@@ -33,61 +33,72 @@ class SessionManager:
                     "locked_by": row[8],
                     "locked_at": row[9],
                     "created_at": row[10],
-                    "updated_at": row[11]
+                    "updated_at": row[11],
+                    "retry_count": row[12] or 0,
+                    "last_error": row[13],
+                    "next_retry_at": row[14]
                 }
         return None
 
     def save_session(self, project_id: str, conversation_id: str, workspace_path: str = None, 
                      repository_url: str = None, default_branch: str = None, current_branch: str = None, 
                      last_commit: str = None, status: str = "ACTIVE", locked_by: str = None, 
-                     locked_at: str = None) -> None:
-        """Save or update the persistent session for a project."""
-        now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
-        session = self.get_session(project_id)
-        
-        # Keep existing fields if none are provided
-        if session:
-            workspace_path = workspace_path or session["workspace_path"]
-            repository_url = repository_url or session["repository_url"]
-            default_branch = default_branch or session["default_branch"]
-            current_branch = current_branch or session["current_branch"]
-            last_commit = last_commit or session["last_commit"]
-            locked_by = locked_by if locked_by is not None else session["locked_by"]
-            locked_at = locked_at if locked_at is not None else session["locked_at"]
-            created_at = session["created_at"]
-        else:
-            created_at = now_str
-
-        with sqlite3.connect(self.db_path) as conn:
-            conn.execute("""
-                INSERT INTO project_sessions (
-                    project_id, conversation_id, workspace_path, repository_url, default_branch, 
-                    current_branch, last_commit, last_activity, status, locked_by, locked_at, 
-                    created_at, updated_at
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(project_id) DO UPDATE SET
-                    conversation_id = excluded.conversation_id,
-                    workspace_path = excluded.workspace_path,
-                    repository_url = excluded.repository_url,
-                    default_branch = excluded.default_branch,
-                    current_branch = excluded.current_branch,
-                    last_commit = excluded.last_commit,
-                    last_activity = excluded.last_activity,
-                    status = excluded.status,
-                    locked_by = excluded.locked_by,
-                    locked_at = excluded.locked_at,
-                    updated_at = excluded.updated_at
-            """, (project_id, conversation_id, workspace_path, repository_url, default_branch, 
-                  current_branch, last_commit, now_str, status, locked_by, locked_at, 
-                  created_at, now_str))
-            conn.commit()
+                     locked_at: str = None, retry_count: int = None, last_error: str = None,
+                     next_retry_at: str = None) -> None:
+         """Save or update the persistent session for a project."""
+         now_str = datetime.datetime.now(datetime.timezone.utc).isoformat()
+         session = self.get_session(project_id)
+         
+         # Keep existing fields if none are provided
+         if session:
+             workspace_path = workspace_path or session["workspace_path"]
+             repository_url = repository_url or session["repository_url"]
+             default_branch = default_branch or session["default_branch"]
+             current_branch = current_branch or session["current_branch"]
+             last_commit = last_commit or session["last_commit"]
+             locked_by = locked_by if locked_by is not None else session["locked_by"]
+             locked_at = locked_at if locked_at is not None else session["locked_at"]
+             created_at = session["created_at"]
+             retry_count = retry_count if retry_count is not None else session["retry_count"]
+             last_error = last_error if last_error is not None else session["last_error"]
+             next_retry_at = next_retry_at if next_retry_at is not None else session["next_retry_at"]
+         else:
+             created_at = now_str
+             retry_count = retry_count or 0
+ 
+         with sqlite3.connect(self.db_path) as conn:
+             conn.execute("""
+                 INSERT INTO project_sessions (
+                     project_id, conversation_id, workspace_path, repository_url, default_branch, 
+                     current_branch, last_commit, last_activity, status, locked_by, locked_at, 
+                     created_at, updated_at, retry_count, last_error, next_retry_at
+                 )
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(project_id) DO UPDATE SET
+                     conversation_id = excluded.conversation_id,
+                     workspace_path = excluded.workspace_path,
+                     repository_url = excluded.repository_url,
+                     default_branch = excluded.default_branch,
+                     current_branch = excluded.current_branch,
+                     last_commit = excluded.last_commit,
+                     last_activity = excluded.last_activity,
+                     status = excluded.status,
+                     locked_by = excluded.locked_by,
+                     locked_at = excluded.locked_at,
+                     updated_at = excluded.updated_at,
+                     retry_count = excluded.retry_count,
+                     last_error = excluded.last_error,
+                     next_retry_at = excluded.next_retry_at
+             """, (project_id, conversation_id, workspace_path, repository_url, default_branch, 
+                   current_branch, last_commit, now_str, status, locked_by, locked_at, 
+                   created_at, now_str, retry_count, last_error, next_retry_at))
+             conn.commit()
 
     def check_session_status(self, project_id: str, client) -> str:
         """Validate conversation presence with Antigravity server and transition states."""
         session = self.get_session(project_id)
         if not session or not session.get("conversation_id"):
-            return "EXPIRED"
+            return "MISSING"
             
         conv_id = session["conversation_id"]
         res = client.get_conversation_metadata(conv_id)
@@ -96,12 +107,12 @@ class SessionManager:
         if not res.get("success"):
             # Check if conversation is deleted or broken
             err_msg = str(res.get("error") or "").lower()
-            if "not found" in err_msg or "expired" in err_msg or "could not find" in err_msg:
-                status = "EXPIRED"
+            if any(term in err_msg for term in ["not found", "expired", "could not find", "deleted"]):
+                status = "MISSING"
             else:
                 status = "BROKEN"
         else:
-            # Check last activity age to classify ACTIVE vs IDLE vs EXPIRED
+            # Check last activity age to classify ACTIVE vs IDLE
             try:
                 meta = res.get("response", {}).get("conversationMetadata", {})
                 # Support both metadata wrapper levels
@@ -112,9 +123,7 @@ class SessionManager:
                 if last_time_str:
                     last_time = datetime.datetime.fromisoformat(last_time_str.replace("Z", "+00:00"))
                     diff = (datetime.datetime.now(datetime.timezone.utc) - last_time).total_seconds()
-                    if diff > 86400.0:   # > 24 hours → treat as EXPIRED (sub-agent is dormant)
-                        status = "EXPIRED"
-                    elif diff > 300.0:   # > 5 minutes → IDLE (resumable)
+                    if diff > 300.0:   # > 5 minutes → IDLE (resumable)
                         status = "IDLE"
                     # else: ACTIVE (recently used)
             except Exception:
