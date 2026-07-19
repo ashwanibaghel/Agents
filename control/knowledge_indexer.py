@@ -4,12 +4,10 @@ import requests
 import datetime
 import json
 from typing import List, Dict
-from control.embedding_provider import EmbeddingProviderRegistry
 
 class KnowledgeIndexer:
-    def __init__(self, db_path: str = "state/task_checkpoints.db", provider_name: str = "gemini"):
+    def __init__(self, db_path: str = "state/task_checkpoints.db"):
         self.db_path = db_path
-        self.provider_name = provider_name
         self._current_worker_id = None   # set by claim_artifact_lease, used in update_artifact_status
         
         self.supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
@@ -190,30 +188,19 @@ class KnowledgeIndexer:
             print(f"⚠️ SQLite status update failed: {sqlite_err}")
 
     def index_artifact(self, task_id: str, name: str, content: str) -> bool:
-        """Perform chunking, embedding generation, and database updates."""
-        try:
-            provider = EmbeddingProviderRegistry.get_provider(self.provider_name)
-        except Exception as e:
-            self.update_artifact_status(task_id, name, "FAILED", f"Provider error: {e}")
-            return False
-
+        """Perform chunking and database updates without generating vector embeddings."""
         chunks = self._chunk_text(content)
         knowledge_payloads = []
         
         for idx, chunk in enumerate(chunks):
-            try:
-                emb = provider.embed_text(chunk)
-                knowledge_payloads.append({
-                    "task_id": task_id,
-                    "name": name,
-                    "chunk_index": idx,
-                    "chunk_text": chunk,
-                    "embedding": emb,
-                    "promoted_level": "TASK"
-                })
-            except Exception as e:
-                self.update_artifact_status(task_id, name, "FAILED", f"Embedding generation failed: {e}")
-                return False
+            knowledge_payloads.append({
+                "task_id": task_id,
+                "name": name,
+                "chunk_index": idx,
+                "chunk_text": chunk,
+                "embedding": [],  # Reserved for future vector search (schema compatibility)
+                "promoted_level": "TASK"
+            })
 
         # 1. Update Supabase knowledge
         if self.supabase_enabled and self.supabase_url:

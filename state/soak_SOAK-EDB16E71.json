@@ -1,0 +1,79 @@
+{
+  "run_id": "SOAK-EDB16E71",
+  "duration_s": 120.1,
+  "timestamp": "2026-07-19T19:15:25.022068",
+  "metrics": {
+    "tasks_created": 1000,
+    "tasks_indexed": 1000,
+    "tasks_failed": 0,
+    "duplicate_chunks": 0,
+    "orphaned_leases": 0,
+    "deadlocks": 0,
+    "total_chunks": 2000,
+    "errors": []
+  },
+  "throughput_per_min": 499.8,
+  "memory_growth_mb": 0.443,
+  "projections_24h": {
+    "tasks": 719694,
+    "chunks": 1439388,
+    "mem_mb": 318.95
+  },
+  "all_pass": true,
+  "snapshots": [
+    {
+      "elapsed_s": 20.0,
+      "mem_mb": 0.123,
+      "tasks_created": 197,
+      "tasks_indexed": 197,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    },
+    {
+      "elapsed_s": 40.1,
+      "mem_mb": 0.227,
+      "tasks_created": 384,
+      "tasks_indexed": 384,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    },
+    {
+      "elapsed_s": 60.1,
+      "mem_mb": 0.332,
+      "tasks_created": 574,
+      "tasks_indexed": 574,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    },
+    {
+      "elapsed_s": 80.1,
+      "mem_mb": 0.439,
+      "tasks_created": 765,
+      "tasks_indexed": 765,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    },
+    {
+      "elapsed_s": 100.2,
+      "mem_mb": 0.515,
+      "tasks_created": 906,
+      "tasks_indexed": 906,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    },
+    {
+      "elapsed_s": 120.1,
+      "mem_mb": 0.566,
+      "tasks_created": 1000,
+      "tasks_indexed": 1000,
+      "tasks_failed": 0,
+      "dup_chunks": 0,
+      "orphaned": 0
+    }
+  ]
+}

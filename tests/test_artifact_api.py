@@ -20,7 +20,6 @@ class TestArtifactAPI(unittest.TestCase):
         
         self.original_sb_get = bridge_server._sb_get
         self.original_sb_post = bridge_server._sb_post
-        self.original_generate_gemini_embedding = bridge_server.generate_gemini_embedding
         
         # Mocks
         self.mock_tasks = {}
@@ -29,8 +28,6 @@ class TestArtifactAPI(unittest.TestCase):
         
         def mock_get(path):
             if "task_artifacts" in path:
-                # E.g., task_artifacts?task_id=eq.OI-LABS-1234&select=name,path,type,size,summary
-                # E.g., task_artifacts?task_id=eq.OI-LABS-1234&name=eq.RECON.md&select=name,content
                 results = []
                 task_id = None
                 name = None
@@ -57,7 +54,6 @@ class TestArtifactAPI(unittest.TestCase):
                 return results
                 
             elif "tasks" in path:
-                # E.g., tasks?task_id=eq.OI-LABS-1234
                 if "task_id=eq." in path:
                     task_id = path.split("task_id=eq.")[1].split("&")[0].split("?")[0]
                     t = self.mock_tasks.get(task_id)
@@ -68,18 +64,12 @@ class TestArtifactAPI(unittest.TestCase):
         def mock_post(path, payload):
             return payload
             
-        def mock_emb(text, api_key):
-            # Return simple unit vector for query
-            return [1.0] + [0.0] * 767
-            
         bridge_server._sb_get = mock_get
         bridge_server._sb_post = mock_post
-        bridge_server.generate_gemini_embedding = mock_emb
 
     def tearDown(self):
         bridge_server._sb_get = self.original_sb_get
         bridge_server._sb_post = self.original_sb_post
-        bridge_server.generate_gemini_embedding = self.original_generate_gemini_embedding
 
     def test_get_task_artifacts_metadata(self):
         """Verify GET /tasks/{task_id}/artifacts returns metadata without content."""
@@ -122,35 +112,12 @@ class TestArtifactAPI(unittest.TestCase):
         self.assertEqual(data["content"], "Secret code content...")
 
     def test_knowledge_search(self):
-        """Verify POST /knowledge/search returns matching sorted chunks based on cosine similarity."""
+        """Verify POST /knowledge/search returns 501 Not Implemented."""
         task_id = "TEST-TASK-001"
-        # query embedding is [1.0, 0.0, ...]
-        # Match 1: embedding [1.0, 0.0, ...] (similarity 1.0)
-        # Match 2: embedding [0.0, 1.0, ...] (similarity 0.0)
-        self.mock_knowledge.append({
-            "task_id": task_id,
-            "name": "RECON.md",
-            "chunk_index": 0,
-            "chunk_text": "Highly relevant database config",
-            "embedding": [1.0] + [0.0] * 767
-        })
-        self.mock_knowledge.append({
-            "task_id": task_id,
-            "name": "RECON.md",
-            "chunk_index": 1,
-            "chunk_text": "Irrelevant styling details",
-            "embedding": [0.0, 1.0] + [0.0] * 766
-        })
-        
         payload = {"query": "database config", "task_id": task_id}
         response = self.client.post("/knowledge/search", json=payload, headers=self.auth_headers)
-        self.assertEqual(response.status_code, 200)
-        data = response.json()
-        self.assertEqual(len(data["matches"]), 2)
-        self.assertEqual(data["matches"][0]["chunk_text"], "Highly relevant database config")
-        self.assertAlmostEqual(data["matches"][0]["similarity"], 1.0)
-        self.assertEqual(data["matches"][1]["chunk_text"], "Irrelevant styling details")
-        self.assertAlmostEqual(data["matches"][1]["similarity"], 0.0)
+        self.assertEqual(response.status_code, 501)
+        self.assertIn("Semantic search is currently disabled", response.json()["detail"])
 
     def test_boss_report_artifact_list(self):
         """Verify boss report includes artifact_list (evidence_paths)."""

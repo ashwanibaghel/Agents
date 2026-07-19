@@ -6,12 +6,10 @@ Unit and integration tests for the Enterprise Knowledge Architecture:
   - ArtifactService (save, PENDING status, event publishing)
   - DatabasePollingEventBus (publish, subscribe, poll)
   - KnowledgeIndexer (chunking, lease claiming, artifact indexing)
-  - ContextBuilder (task context aggregation)
+  - ContextBuilder (task context aggregation & fallback)
   - Bridge Server new endpoints
   - Worker refactor validation
-  - Cosine similarity helpers
   - KnowledgeIndexerService structure
-  - EmbeddingProvider registry
 """
 
 import json
@@ -272,7 +270,7 @@ class TestKnowledgeIndexer:
     def _make_indexer(self, tmp_path):
         from control.knowledge_indexer import KnowledgeIndexer
         db = _make_sqlite(str(tmp_path))
-        return KnowledgeIndexer(db_path=db, provider_name="gemini"), db
+        return KnowledgeIndexer(db_path=db), db
 
     def test_chunk_text_basic(self, tmp_path):
         idx, _ = self._make_indexer(tmp_path)
@@ -318,25 +316,25 @@ class TestKnowledgeIndexer:
             claimed = idx.claim_artifact_lease("TASK-L2", "active.md", "worker-002")
         assert claimed is False
 
-    def test_index_artifact_uses_provider(self, tmp_path):
+    def test_index_artifact_without_embedding(self, tmp_path):
         idx, db = self._make_indexer(tmp_path)
         with sqlite3.connect(db) as conn:
             conn.execute(
                 "INSERT INTO task_artifacts (task_id, name, path, type, size, content, indexing_status) "
-                "VALUES ('TASK-IDX', 'tst.md', 'tst.md', 'markdown', 3, 'hello world', 'INDEXING')"
+                "VALUES ('TASK-IDX', 'tst.md', 'tst.md', 'markdown', 11, 'hello world', 'INDEXING')"
             )
             conn.commit()
-        mock_provider = MagicMock()
-        mock_provider.embed_text.return_value = [0.1] * 768
-        with patch("control.knowledge_indexer.EmbeddingProviderRegistry.get_provider", return_value=mock_provider):
-            with patch.dict(os.environ, {"SUPABASE_ENABLED": "false"}):
-                result = idx.index_artifact("TASK-IDX", "tst.md", "hello world")
+        with patch.dict(os.environ, {"SUPABASE_ENABLED": "false"}):
+            result = idx.index_artifact("TASK-IDX", "tst.md", "hello world")
         assert result is True
         with sqlite3.connect(db) as conn:
+            conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 "SELECT * FROM task_knowledge WHERE task_id='TASK-IDX'"
             ).fetchall()
-        assert len(rows) >= 1
+        assert len(rows) == 1
+        assert rows[0]["chunk_text"] == "hello world"
+        assert rows[0]["embedding"] == "[]"
 
 
 # ===========================================================================
@@ -392,34 +390,22 @@ class TestContextBuilder:
         b_pos = context.find("b.md")
         assert a_pos < b_pos
 
-
-# ===========================================================================
-# Cosine Similarity Helper Tests
-# ===========================================================================
-
-class TestCosineSimilarity:
-    def test_identical_vectors_similarity_is_one(self):
-        from bridge_server import cosine_similarity
-        v = [0.5, 0.3, 0.8]
-        assert cosine_similarity(v, v) == pytest.approx(1.0, abs=1e-9)
-
-    def test_orthogonal_vectors_similarity_is_zero(self):
-        from bridge_server import cosine_similarity
-        v1 = [1.0, 0.0]
-        v2 = [0.0, 1.0]
-        assert cosine_similarity(v1, v2) == pytest.approx(0.0, abs=1e-9)
-
-    def test_zero_vector_returns_zero(self):
-        from bridge_server import cosine_similarity
-        v1 = [0.0, 0.0, 0.0]
-        v2 = [1.0, 2.0, 3.0]
-        assert cosine_similarity(v1, v2) == 0.0
-
-    def test_opposite_vectors_similarity_is_negative_one(self):
-        from bridge_server import cosine_similarity
-        v1 = [1.0, 0.0]
-        v2 = [-1.0, 0.0]
-        assert cosine_similarity(v1, v2) == pytest.approx(-1.0, abs=1e-9)
+    def test_build_context_fallback_to_artifacts_directly(self, tmp_path):
+        from control.context_builder import ContextBuilder
+        db = _make_sqlite(str(tmp_path))
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "INSERT INTO task_artifacts (task_id, name, path, type, size, summary, content, indexing_status) "
+                "VALUES ('TASK-FALLBACK', 'fallback.md', 'fallback.md', 'markdown', 25, 'Summary text', 'Fallback content directly', 'PENDING')"
+            )
+            # DO NOT insert into task_knowledge
+            conn.commit()
+        builder = ContextBuilder(db_path=db)
+        with patch.dict(os.environ, {"SUPABASE_ENABLED": "false"}):
+            context = builder.build_task_context("TASK-FALLBACK")
+        assert "TASK-FALLBACK" in context
+        assert "fallback.md" in context
+        assert "Fallback content directly" in context
 
 
 # ===========================================================================
@@ -476,28 +462,5 @@ class TestKnowledgeIndexerService:
         assert "bridge_server" not in source
 
 
-# ===========================================================================
-# EmbeddingProvider Tests
-# ===========================================================================
 
-class TestEmbeddingProvider:
-    def test_gemini_provider_raises_on_api_error(self):
-        from control.embedding_provider import GeminiEmbeddingProvider
-        provider = GeminiEmbeddingProvider(api_key="fake-key")
-        with patch("requests.post") as mock_post:
-            mock_post.return_value.status_code = 500
-            mock_post.return_value.text = "Internal Server Error"
-            with pytest.raises(Exception):
-                provider.embed_text("test text")
-
-    def test_registry_returns_gemini_by_default(self):
-        from control.embedding_provider import EmbeddingProviderRegistry
-        with patch.dict(os.environ, {"GEMINI_API_KEY": "test-key"}):
-            provider = EmbeddingProviderRegistry.get_provider("gemini")
-        assert provider is not None
-
-    def test_registry_raises_for_unknown_provider(self):
-        from control.embedding_provider import EmbeddingProviderRegistry
-        with pytest.raises((ValueError, KeyError)):
-            EmbeddingProviderRegistry.get_provider("openai_unknown_xyz")
 

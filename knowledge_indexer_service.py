@@ -30,15 +30,12 @@ def run_indexer_service():
     print(f"🚀 Ashwani Agent Company Knowledge Indexer Service")
     print(f"Worker ID: {INDEXER_WORKER_ID}")
     print(f"Process ID: {os.getpid()}")
-    print(f"Embedding Provider: {os.environ.get('EMBEDDING_PROVIDER', 'gemini')}")
     print(f"Supabase Backend: {os.environ.get('SUPABASE_ENABLED', 'false')}")
     print("=" * 60)
 
     # Initialize components
     event_bus = DatabasePollingEventBus()
-    # Resolve embedding provider name from environment
-    provider_name = os.environ.get("EMBEDDING_PROVIDER", "gemini")
-    indexer = KnowledgeIndexer(provider_name=provider_name)
+    indexer = KnowledgeIndexer()
 
     # Subscribe to artifact creation events
     def on_artifact_created(event_payload: dict):
@@ -53,7 +50,7 @@ def run_indexer_service():
             print(f"🔒 [Lock] Claimed lease for artifact: {name}. Commencing chunk indexing...")
             start_time = time.time()
             
-            # Perform sliding-window chunking, API vector embedding, and DB insertion
+            # Perform sliding-window chunking and DB insertion
             success = indexer.index_artifact(task_id, name, content)
             latency = time.time() - start_time
             

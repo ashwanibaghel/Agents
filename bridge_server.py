@@ -141,32 +141,7 @@ class KnowledgeSearchResponse(BaseModel):
 
 import math
 
-def dot_product(v1, v2):
-    return sum(x * y for x, y in zip(v1, v2))
-
-def magnitude(v):
-    return math.sqrt(sum(x * x for x in v))
-
-def cosine_similarity(v1, v2):
-    mag1 = magnitude(v1)
-    mag2 = magnitude(v2)
-    if mag1 == 0.0 or mag2 == 0.0:
-        return 0.0
-    return dot_product(v1, v2) / (mag1 * mag2)
-
-def generate_gemini_embedding(text: str, api_key: str) -> list:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/text-embedding-004:embedContent?key={api_key}"
-    payload = {
-        "model": "models/text-embedding-004",
-        "content": {
-            "parts": [{"text": text}]
-        }
-    }
-    r = requests.post(url, json=payload, timeout=10.0)
-    if r.status_code == 200:
-        return r.json()["embedding"]["values"]
-    else:
-        raise Exception(f"Gemini API returned code {r.status_code}: {r.text}")
+# Cosine similarity and Gemini embedding helpers removed (vector search is disabled)
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
@@ -337,49 +312,7 @@ def search_knowledge(req: KnowledgeSearchRequest):
     """
     Perform semantic vector/similarity search across all task knowledge chunks.
     """
-    api_key = os.environ.get("GEMINI_API_KEY", "")
-    if not api_key:
-        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not configured on server")
-    try:
-        query_emb = generate_gemini_embedding(req.query, api_key)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to generate query embedding: {str(e)}")
-        
-    path = "task_knowledge?select=name,chunk_text,embedding"
-    if req.task_id:
-        path += f"&task_id=eq.{req.task_id}"
-    elif req.project_id:
-        tasks = _sb_get(f"tasks?project=eq.{req.project_id}&select=task_id")
-        task_ids = [t["task_id"] for t in tasks]
-        if not task_ids:
-            return KnowledgeSearchResponse(matches=[])
-        ids_str = ",".join(task_ids)
-        path += f"&task_id=in.({ids_str})"
-        
-    rows = _sb_get(path)
-    
-    matches = []
-    for r in rows:
-        emb = r.get("embedding")
-        if isinstance(emb, str):
-            try:
-                emb = json.loads(emb)
-            except Exception:
-                continue
-        if not isinstance(emb, list) or len(emb) != 768:
-            continue
-            
-        sim = cosine_similarity(query_emb, emb)
-        matches.append(
-            KnowledgeSearchItem(
-                name=r["name"],
-                chunk_text=r["chunk_text"],
-                similarity=float(sim)
-            )
-        )
-        
-    matches.sort(key=lambda x: x.similarity, reverse=True)
-    return KnowledgeSearchResponse(matches=matches[:5])
+    raise HTTPException(status_code=501, detail="Semantic search is currently disabled.")
 
 
 # ── Context Builder Endpoint ───────────────────────────────────────────────────

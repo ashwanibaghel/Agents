@@ -31,7 +31,7 @@ class ContextBuilder:
 
     def _get_artifacts(self, task_id: str) -> List[dict]:
         if self.supabase_enabled and self.supabase_url:
-            url = f"{self.supabase_url}/rest/v1/task_artifacts?task_id=eq.{task_id}&select=name,path,type,size,summary,indexing_status"
+            url = f"{self.supabase_url}/rest/v1/task_artifacts?task_id=eq.{task_id}&select=name,path,type,size,summary,indexing_status,content"
             try:
                 r = requests.get(url, headers=self.headers, timeout=5.0)
                 if r.status_code == 200:
@@ -46,7 +46,7 @@ class ContextBuilder:
                     conn.row_factory = sqlite3.Row
                     cursor = conn.cursor()
                     cursor.execute("""
-                        SELECT name, path, type, size, summary, indexing_status 
+                        SELECT name, path, type, size, summary, indexing_status, content 
                         FROM task_artifacts 
                         WHERE task_id = ?
                     """, (task_id,))
@@ -102,7 +102,7 @@ class ContextBuilder:
         lines.append(f"**Project**: {task.get('project')}")
         lines.append(f"**Objective**: {task.get('objective')}")
         lines.append(f"**Status**: {task.get('status')}")
-        lines.append(f"**Summary**: {task.get('summary') or 'No summary summary available.'}")
+        lines.append(f"**Summary**: {task.get('summary') or 'No summary available.'}")
         lines.append("")
         
         lines.append("## ARTIFACTS LIST")
@@ -120,6 +120,13 @@ class ContextBuilder:
             for kn in sorted(knowledge, key=lambda x: (x["name"], x["chunk_index"])):
                 lines.append(f"### File: {kn['name']} (Chunk {kn['chunk_index']}, Scope: {kn.get('promoted_level', 'TASK')})")
                 lines.append(f"```text\n{kn['chunk_text']}\n```")
+        elif artifacts:
+            # Fallback: Read artifact content directly from task_artifacts if task_knowledge is empty
+            lines.append("<!-- Fallback: Showing raw artifact content due to empty knowledge store -->")
+            for art in artifacts:
+                content = art.get("content") or ""
+                lines.append(f"### File: {art['name']} (Raw Content, Scope: TASK)")
+                lines.append(f"```text\n{content}\n```")
         else:
             lines.append("No detailed knowledge chunks indexed for this task.")
             
